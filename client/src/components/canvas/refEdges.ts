@@ -9,12 +9,14 @@ import type { AnyGraphNode, NodeType } from "../../types/graph";
 // value), and the referenced type gets a single generic OUTPUT port on its RIGHT (anyone can wire
 // into it). The holder always keeps the field — this only changes which side of the canvas the dot
 // lives on.
-// Array-valued ref fields where the array holds unrelated free-form items (table.relations[])
-// don't get ports — a single edge can't represent "one of many" cleanly. The one shape that DOES
-// get ports is "returns[].chainToId": each return is already its own named thing (a status code),
-// so each one becomes its own OUTPUT port (middleware/operation choosing where a given outcome
-// routes to), and the chain target (middleware/service/errorHandler) gets one generic INPUT port
-// any of them can land on — mirrors Sample Texture 2D's per-channel outputs in the Unity reference.
+// Array-valued ref fields where the array holds unrelated free-form items (table.relations[],
+// navigationRouter.routes[], layout.slots[]) don't get ports — a single edge can't represent "one
+// of many" cleanly. The one shape that DOES get ports is an array item's "chainToId" field
+// (returns[].chainToId on operation/middleware, errors[].chainToId on service/email): each such
+// item is already its own named thing (a status code), so each one becomes its own OUTPUT port
+// (choosing where a given outcome routes to), and the chain target (middleware/service/
+// errorHandler) gets one generic INPUT port any of them can land on — mirrors Sample Texture 2D's
+// per-channel outputs in the Unity reference.
 
 export interface RefInputPort {
   field: string;
@@ -69,6 +71,11 @@ export const CHAIN_INPUT_HANDLE = "chain-in";
 function parseArraySpec(spec: RefFieldSpec): ArrayRefSpec | undefined {
   if (!spec.array || !spec.field.includes("[].")) return undefined;
   const [arrayField, itemField] = spec.field.split("[].");
+  // Only a chainToId item field gets chain ports — table.relations[].targetTableId,
+  // navigationRouter.routes[].pageId, and layout.slots[].componentId are plain array refs, not
+  // outcome-routing chains, and their items don't have the status/description shape chain port
+  // labels read.
+  if (itemField !== "chainToId") return undefined;
   const targetTypes = Array.isArray(spec.targetType) ? spec.targetType : [spec.targetType];
   return { arrayField, itemField, targetTypes };
 }

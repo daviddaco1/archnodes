@@ -203,16 +203,21 @@ function toSyntheticRefRFEdges(nodes: AnyGraphNode[], refFields: SchemaResponse[
     }));
 }
 
-function toChainRFEdges(nodes: AnyGraphNode[], refFields: SchemaResponse["refFields"] | undefined): RFEdge[] {
-  return synthesizeChainEdges(nodes, refFields).map((e) => ({
-    id: e.id,
-    source: e.source,
-    target: e.target,
-    sourceHandle: e.sourceHandle,
-    targetHandle: CHAIN_INPUT_HANDLE,
-    style: { stroke: "var(--color-preview)", strokeDasharray: "2 3" },
-    data: { isRef: true },
-  }));
+// Same dedup as toSyntheticRefRFEdges — a chain target that's also a real hierarchy/invalidates
+// parent of the same pair would otherwise draw a redundant second line.
+function toChainRFEdges(nodes: AnyGraphNode[], refFields: SchemaResponse["refFields"] | undefined, existingEdges: GraphEdge[]): RFEdge[] {
+  const connectedPairs = new Set(existingEdges.map((e) => [e.source, e.target].sort().join("::")));
+  return synthesizeChainEdges(nodes, refFields)
+    .filter((e) => !connectedPairs.has([e.source, e.target].sort().join("::")))
+    .map((e) => ({
+      id: e.id,
+      source: e.source,
+      target: e.target,
+      sourceHandle: e.sourceHandle,
+      targetHandle: CHAIN_INPUT_HANDLE,
+      style: { stroke: "var(--color-preview)", strokeDasharray: "2 3" },
+      data: { isRef: true },
+    }));
 }
 
 export function GraphCanvas({ category }: GraphCanvasProps) {
@@ -414,7 +419,7 @@ export function GraphCanvas({ category }: GraphCanvasProps) {
     setRfEdges([
       ...toRFEdges(categoryEdges),
       ...toSyntheticRefRFEdges(categoryNodes, schema?.refFields, categoryEdges),
-      ...toChainRFEdges(categoryNodes, schema?.refFields),
+      ...toChainRFEdges(categoryNodes, schema?.refFields, categoryEdges),
     ]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
@@ -446,14 +451,19 @@ export function GraphCanvas({ category }: GraphCanvasProps) {
       const source = nodesById.get(connection.source ?? "");
       const target = nodesById.get(connection.target ?? "");
       if (!source || !target) return false;
+      const sourceHandle = connection.sourceHandle ?? undefined;
       if (connection.targetHandle === CHAIN_INPUT_HANDLE) {
-        const spec = connection.sourceHandle ? chainSpecForHandle(source.type, connection.sourceHandle) : undefined;
+        const spec = sourceHandle ? chainSpecForHandle(source.type, sourceHandle) : undefined;
         return Boolean(spec && spec.targetTypes.includes(target.type));
       }
       if (connection.targetHandle) {
+        // A ref-input port only accepts the generic ref-out handle, not a chain output port.
+        if (sourceHandle && sourceHandle !== REF_OUTPUT_HANDLE) return false;
         const port = refInputPort(refPortRules, target.type, connection.targetHandle);
         return Boolean(port && port.targetTypes.includes(source.type));
       }
+      // A plain hierarchy connection can't originate from a ref-out or chain output port.
+      if (sourceHandle) return false;
       return edgeKind(connectionRules, source.type, target.type) !== undefined;
     },
     [connectionRules, refPortRules, chainSpecForHandle, nodesById],
@@ -475,10 +485,12 @@ export function GraphCanvas({ category }: GraphCanvasProps) {
           items[index] = { ...items[index], [spec.itemField]: connection.target };
           await api.updateNode(connection.source, { [spec.arrayField]: items });
         } else if (connection.targetHandle) {
+          if (connection.sourceHandle && connection.sourceHandle !== REF_OUTPUT_HANDLE) return;
           const port = refInputPort(refPortRules, target.type, connection.targetHandle);
           if (!port || !port.targetTypes.includes(source.type)) return;
           await api.updateNode(connection.target, { [connection.targetHandle]: connection.source });
         } else {
+          if (connection.sourceHandle) return;
           const kind = edgeKind(connectionRules, source.type, target.type);
           if (!kind) return;
           await api.createEdge(connection.source, connection.target, kind);

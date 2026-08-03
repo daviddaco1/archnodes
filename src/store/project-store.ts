@@ -16,6 +16,7 @@ import { BACKEND_NODE_TYPES, FRONTEND_NODE_TYPES } from "../types/graph.js";
 import {
   ValidationError,
   canConnectSpecial,
+  clearDanglingRefs,
   validateProjectGraph,
   validateRefs,
   type ValidationIssue,
@@ -24,6 +25,8 @@ import {
 
 const BACKEND_SET = new Set<NodeType>(BACKEND_NODE_TYPES);
 const FRONTEND_SET = new Set<NodeType>(FRONTEND_NODE_TYPES);
+// Visual-only structural types have no scope of their own — they belong in every scoped view.
+const STRUCTURAL_SET = new Set<NodeType>(["container", "boundary", "note"]);
 
 export interface ProjectStoreOptions {
   baseDir?: string;
@@ -168,7 +171,7 @@ export function createProjectStore(projectName: string, opts: ProjectStoreOption
     getProject(scope: ProjectScope = "all") {
       if (scope === "all") return graph;
       const set = scope === "backend" ? BACKEND_SET : FRONTEND_SET;
-      const nodes = graph.nodes.filter((n) => set.has(n.type));
+      const nodes = graph.nodes.filter((n) => set.has(n.type) || STRUCTURAL_SET.has(n.type));
       const nodeIds = new Set(nodes.map((n) => n.id));
       const edges = graph.edges.filter((e) => nodeIds.has(e.source) && nodeIds.has(e.target));
       return { manifest: graph.manifest, nodes, edges };
@@ -277,6 +280,7 @@ export function createProjectStore(projectName: string, opts: ProjectStoreOption
 
       graph.nodes = graph.nodes.filter((n) => !toDelete.has(n.id));
       graph.edges = graph.edges.filter((e) => !toDelete.has(e.source) && !toDelete.has(e.target));
+      clearDanglingRefs(graph.nodes, toDelete);
       persist();
       return { deletedIds: [...toDelete] };
     },
@@ -293,6 +297,14 @@ export function createProjectStore(projectName: string, opts: ProjectStoreOption
             message: `Invalid ${edgeType} edge: ${source.type} -> ${target.type}`,
           },
         ]);
+      }
+      const existing = graph.edges.find(
+        (e) => e.source === sourceId && e.target === targetId && e.edgeType === edgeType,
+      );
+      if (existing) return existing;
+      if (edgeType === "hierarchy") {
+        // A child has at most one live hierarchy parent — reparenting replaces the old edge.
+        graph.edges = graph.edges.filter((e) => !(e.edgeType === "hierarchy" && e.target === targetId));
       }
       const edge: GraphEdge = { id: randomUUID(), source: sourceId, target: targetId, edgeType };
       graph.edges.push(edge);

@@ -33,8 +33,14 @@ export const REF_FIELDS: Partial<Record<NodeType, RefFieldSpec[]>> = {
   subdomain: [{ field: "domainId", targetType: "domain" }],
   // Canonical direction is db -> orm (orm.dbId would just be the same relationship reversed).
   db: [{ field: "ormId", targetType: "orm" }],
-  repository: [{ field: "ormId", targetType: "orm" }],
-  service: [{ field: "ormId", targetType: "orm" }],
+  repository: [
+    { field: "ormId", targetType: "orm" },
+    { field: "entityRef", targetType: ["model", "table"] },
+  ],
+  service: [
+    { field: "ormId", targetType: "orm" },
+    { field: "errors[].chainToId", targetType: ["middleware", "service", "errorHandler"], array: true },
+  ],
   model: [{ field: "tableId", targetType: "table" }],
   queue: [
     { field: "toolId", targetType: "tool" },
@@ -46,6 +52,7 @@ export const REF_FIELDS: Partial<Record<NodeType, RefFieldSpec[]>> = {
   email: [
     { field: "providerId", targetType: "tool" },
     { field: "queueId", targetType: "queue" },
+    { field: "errors[].chainToId", targetType: ["middleware", "service", "errorHandler"], array: true },
   ],
   page: [
     { field: "guardId", targetType: "guard" },
@@ -60,6 +67,7 @@ export const REF_FIELDS: Partial<Record<NodeType, RefFieldSpec[]>> = {
     { field: "storeId", targetType: "stateStore" },
   ],
   modalDialog: [{ field: "contentComponentId", targetType: "component" }],
+  layout: [{ field: "slots[].componentId", targetType: "component", array: true }],
   navigationRouter: [{ field: "routes[].pageId", targetType: "page", array: true }],
   endpoint: [{ field: "cacheable.invalidatedBy[]", targetType: ["redisKey", "endpoint"], array: true }],
   operation: [{ field: "returns[].chainToId", targetType: ["middleware", "service", "errorHandler"], array: true }],
@@ -219,6 +227,48 @@ function collectRefValues(props: Record<string, unknown>, spec: RefFieldSpec): s
     return container.filter((v): v is string => typeof v === "string" && v.length > 0);
   }
   return [];
+}
+
+// Strips any REF_FIELDS value pointing at a deleted id, so a delete never leaves a dangling ref
+// behind for validate_project to catch later. Mutates props in place.
+export function clearDanglingRefs(nodes: AnyGraphNode[], deletedIds: Set<string>): void {
+  for (const node of nodes) {
+    const specs = REF_FIELDS[node.type] ?? [];
+    if (specs.length === 0) continue;
+    const props = node.props as Record<string, unknown>;
+    for (const spec of specs) {
+      if (!spec.array) {
+        const value = getByPath(props, spec.field);
+        if (typeof value === "string" && deletedIds.has(value)) delete props[spec.field];
+        continue;
+      }
+      if (spec.field.includes("[].")) {
+        const [arrayField, itemField] = spec.field.split("[].");
+        const container = arrayField.includes(".")
+          ? arrayField.split(".").reduce<unknown>((acc, key) => getByPath(acc, key), props)
+          : getByPath(props, arrayField);
+        if (!Array.isArray(container)) continue;
+        for (const item of container) {
+          if (!item || typeof item !== "object") continue;
+          const value = (item as Record<string, unknown>)[itemField];
+          if (typeof value === "string" && deletedIds.has(value)) delete (item as Record<string, unknown>)[itemField];
+        }
+        continue;
+      }
+      if (spec.field.endsWith("[]")) {
+        const path = spec.field.slice(0, -2);
+        const keys = path.split(".");
+        const lastKey = keys[keys.length - 1];
+        const parent = keys.length > 1 ? keys.slice(0, -1).reduce<unknown>((acc, key) => getByPath(acc, key), props) : props;
+        if (!parent || typeof parent !== "object") continue;
+        const container = (parent as Record<string, unknown>)[lastKey];
+        if (!Array.isArray(container)) continue;
+        (parent as Record<string, unknown>)[lastKey] = container.filter(
+          (v) => !(typeof v === "string" && deletedIds.has(v)),
+        );
+      }
+    }
+  }
 }
 
 export function validateRefs(nodes: AnyGraphNode[]): ValidationIssue[] {

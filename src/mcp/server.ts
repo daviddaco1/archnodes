@@ -2,7 +2,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import type { ProjectStore } from "../store/project-store.js";
-import { ValidationError, HIERARCHY_RULES, REQUIRED_FIELDS, REF_FIELDS, SPECIAL_EDGES } from "../validation/rules.js";
+import { ValidationError } from "../validation/rules.js";
+import { buildSchemaResponse } from "../schema.js";
 import { exportMarkdown } from "../export/markdown.js";
 import type { EdgeType, NodeType, ProjectScope } from "../types/graph.js";
 
@@ -35,13 +36,7 @@ export function createMcpServer(store: ProjectStore): McpServer {
   server.registerTool(
     "get_schema",
     { description: "Get node hierarchy rules, required fields, and ref field specs" },
-    async () =>
-      tryResult(() => ({
-        hierarchyRules: HIERARCHY_RULES,
-        requiredFields: REQUIRED_FIELDS,
-        refFields: REF_FIELDS,
-        specialEdges: SPECIAL_EDGES,
-      })),
+    async () => tryResult(() => buildSchemaResponse()),
   );
 
   server.registerTool(
@@ -63,7 +58,7 @@ export function createMcpServer(store: ProjectStore): McpServer {
     "get_node",
     {
       description: "Get a single node by id",
-      inputSchema: { id: z.string(), resolveRefs: z.boolean().optional() },
+      inputSchema: { id: z.string() },
     },
     async ({ id }) => tryResult(() => store.getNode(id)),
   );
@@ -93,6 +88,24 @@ export function createMcpServer(store: ProjectStore): McpServer {
   );
 
   server.registerTool(
+    "set_position",
+    {
+      description: "Move a node on the canvas",
+      inputSchema: { id: z.string(), position: z.object({ x: z.number(), y: z.number() }) },
+    },
+    async ({ id, position }) => tryResult(() => store.setPosition(id, position)),
+  );
+
+  server.registerTool(
+    "set_container",
+    {
+      description: "Set or clear a node's visual container grouping (not a hierarchy edge)",
+      inputSchema: { id: z.string(), containerId: z.string().optional() },
+    },
+    async ({ id, containerId }) => tryResult(() => store.setContainer(id, containerId)),
+  );
+
+  server.registerTool(
     "delete_node",
     {
       description: "Delete a node, optionally cascading to its hierarchy children",
@@ -109,6 +122,19 @@ export function createMcpServer(store: ProjectStore): McpServer {
     },
     async ({ sourceId, targetId, edgeType }) =>
       tryResult(() => store.connectNodes(sourceId, targetId, edgeType as EdgeType | undefined)),
+  );
+
+  server.registerTool(
+    "delete_edge",
+    {
+      description: "Delete an edge by id",
+      inputSchema: { id: z.string() },
+    },
+    async ({ id }) =>
+      tryResult(() => {
+        store.deleteEdge(id);
+        return { deleted: true };
+      }),
   );
 
   server.registerTool(

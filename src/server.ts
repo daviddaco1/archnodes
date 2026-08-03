@@ -5,30 +5,15 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
 import type { ProjectStore } from "./store/project-store.js";
-import { ValidationError, HIERARCHY_RULES, REQUIRED_FIELDS, REF_FIELDS, SPECIAL_EDGES } from "./validation/rules.js";
+import { ValidationError } from "./validation/rules.js";
 import type { EdgeType, NodeType } from "./types/graph.js";
+import { buildSchemaResponse } from "./schema.js";
 import { exportMarkdown } from "./export/markdown.js";
 import { TEMPLATES, applyTemplate } from "./init/templates.js";
 import { FRAMEWORKS_BY_LANGUAGE, suggestFrameworks, suggestStack } from "./init/suggestions.js";
 import { applyWizardAnswers, type WizardAnswers } from "./init/wizard.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-
-function buildSchemaResponse() {
-  const connections: { from: NodeType; to: NodeType; kind: "hierarchy" | "invalidates" }[] = [];
-  for (const [from, targets] of Object.entries(HIERARCHY_RULES) as [NodeType, NodeType[]][]) {
-    for (const to of targets) connections.push({ from, to, kind: "hierarchy" });
-  }
-  for (const from of SPECIAL_EDGES.invalidates.from) {
-    for (const to of SPECIAL_EDGES.invalidates.to) connections.push({ from, to, kind: "invalidates" });
-  }
-  return {
-    connections,
-    nodeTypes: Object.keys(REQUIRED_FIELDS) as NodeType[],
-    requiredFields: REQUIRED_FIELDS,
-    refFields: REF_FIELDS,
-  };
-}
 
 export function createServer(store: ProjectStore): express.Express {
   const app = express();
@@ -45,7 +30,15 @@ export function createServer(store: ProjectStore): express.Express {
 
   app.get("/api/nodes", (req: Request, res: Response) => {
     const type = req.query.type as NodeType | undefined;
-    res.json(store.listNodes(type));
+    let filters: Record<string, unknown> | undefined;
+    if (typeof req.query.filters === "string") {
+      try {
+        filters = JSON.parse(req.query.filters) as Record<string, unknown>;
+      } catch {
+        return res.status(400).json({ error: "filters must be a JSON-encoded object" });
+      }
+    }
+    res.json(store.listNodes(type, filters));
   });
 
   app.get("/api/nodes/:id", (req: Request, res: Response) => {
@@ -56,7 +49,10 @@ export function createServer(store: ProjectStore): express.Express {
 
   app.post("/api/nodes", (req: Request, res: Response) => {
     const { type, props, parentId } = req.body ?? {};
-    const node = store.createNode(type, props, parentId);
+    if (typeof type !== "string" || typeof props !== "object" || props === null) {
+      return res.status(400).json({ error: "type (string) and props (object) are required" });
+    }
+    const node = store.createNode(type as NodeType, props, parentId);
     res.status(201).json(node);
   });
 
@@ -110,6 +106,7 @@ export function createServer(store: ProjectStore): express.Express {
     try {
       applyTemplate(store, templateId);
     } catch (err) {
+      if (err instanceof ValidationError) return res.status(400).json({ error: err.message, issues: err.issues });
       return res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
     }
     res.json(store.getProject("all"));

@@ -39,15 +39,19 @@ Other CLI commands: `dist/cli.js mcp --project <name>` (starts the MCP stdio ser
 ### Data model (`src/types/graph.ts`)
 
 Everything is a `GraphNode<T>` = `{ id, type, label, position, parentId?, containerId?, generated?, createdAt, updatedAt, props }`, where `props` is a per-type interface (`NodePropsMap`). Node types split into three groups:
-- **Backend**: `domain, subdomain, route, endpoint, middleware, service, model, table, db, orm, repository, tool, queue, externalApi, scheduler, errorHandler, envConfig, websocket, email, redisKey`
+- **Backend**: `domain, subdomain, route, endpoint, operation, middleware, service, model, table, db, orm, repository, tool, queue, externalApi, scheduler, errorHandler, envConfig, websocket, websocketEvent, websocketEmit, email, redisKey`
 - **Frontend**: `page, layout, component, form, stateStore, apiCall, hook, navigationRouter, guard, modalDialog, themeToken, asset`
-- **Structural**: `container` (visual-only grouping, see below)
+- **Structural**: `container`, `boundary`, `note` (visual-only, no hierarchy/validation role — `boundary` is a styled grouping like `container`, distinguished by `props.kind`; `note` is a freeform sticky)
+
+`endpoint.methods: HttpMethod[]` can list several HTTP methods on one node (no more one-endpoint-per-method). `endpoint` itself only keeps what's shared across methods (`headers`, `cacheable`, `isPublic`/`authMethods`); per-method `query`/`params`/`body`/`returns` live on optional `operation` children (`endpoint -> operation` hierarchy, one per method). `validateOperationMethods` (`src/validation/rules.ts`) rejects an operation whose `method` isn't in the parent endpoint's `methods`, or that collides with a sibling operation's method — enforced at write time in the store, not just the diagnostic sweep.
 
 Two kinds of relationship, both stored as `GraphEdge { source, target, edgeType }`:
 - `"hierarchy"` — real parent/child (e.g. domain→route→endpoint→middleware→service). Governs `parentId` and drives the tree walk used by markdown export and the scaffold/sync skills.
 - `"invalidates"` — the one non-hierarchy edge kind, `endpoint -> (redisKey | endpoint)`, for cache invalidation wiring.
 
 There's a third, separate concept: **ref fields** — plain string/array fields *inside* `props` that point at another node's id by convention (e.g. `subdomain.props.domainId`, `apiCall.props.endpointRef`, `navigationRouter.props.routes[].pageId`). These are NOT edges; they're validated by path-walking `REF_FIELDS` specs, not by graph traversal. Don't confuse the two when adding a new relationship — decide whether it's a structural hierarchy/invalidates edge or a ref field, and wire it into the right table.
+
+For a 1:1-ish ref relationship, put the field on only one side (e.g. `db.ormId`, not also `orm.dbId`) — a reciprocal pair is redundant data and (before the canvas ports rework below) used to draw two overlapping edges for the same relationship. Pick whichever side reads naturally as "the holder."
 
 `containerId` (used via `setContainer`) is a fourth, independent concept: pure visual/canvas grouping (a React Flow subflow) with no validation rule and no effect on hierarchy — never conflate it with `parentId`.
 
@@ -72,7 +76,7 @@ The Express server also statically serves `client/dist` (built React SPA) with a
 
 ### Markdown export (`src/export/markdown.ts`)
 
-`exportMarkdown(graph, validation?, domainId?)` renders the graph into an LLM-context-friendly markdown document: manifest, then per-domain trees (route nesting, endpoint middleware chain + resolved service, aggregated returns table, cache config), floating infra sections (models/tables/tools/external APIs/emails), then frontend (navigation, pages with their component/apiCall/form descendants, stores), then validation warnings. It includes a hand-rolled minimal YAML emitter (`toYamlBlock`) instead of a dependency — intentional, the only inputs are our own plain-data `props` objects.
+`exportMarkdown(graph, validation?, domainId?)` renders the graph into an LLM-context-friendly markdown document: manifest, then per-domain trees (route nesting, an endpoint's shared headers/access (`isPublic`/`authMethods`) + its own middleware chain if it has no `operation` children, each `operation` child rendered with its own query/params/body/aggregated-returns table via the shared `renderChain` helper, cache config), floating infra sections (models/tables/tools/external APIs/emails), then frontend (navigation, pages with their component/apiCall/form descendants, stores), then validation warnings. It includes a hand-rolled minimal YAML emitter (`toYamlBlock`) instead of a dependency — intentional, the only inputs are our own plain-data `props` objects.
 
 ### Agent skills (`skills/*.md`)
 
@@ -85,10 +89,11 @@ These encode the intended workflow contract (e.g. "never silently delete nodes t
 
 ### Client (`client/src/`)
 
-- `context/GraphContext.tsx` — the one global state container: fetches `/api/project` + `/api/schema` on mount, exposes `nodes/edges/manifest/schema/connectionRules` plus `selectedNodeId` to the whole tree. `connectionRules` is derived from the schema's `connections` list via `buildRuleMap` (`components/canvas/edgeValidation.ts`) and used to allow/reject drag-to-connect on the canvas client-side (mirroring, not replacing, server-side validation).
+- `context/GraphContext.tsx` — the one global state container: fetches `/api/project` + `/api/schema` on mount, exposes `nodes/edges/manifest/schema/connectionRules` plus `refPortRules`/`arrayRefPorts`/`chainTargetTypes` (ports, see below) and `selectedNodeId` to the whole tree. `connectionRules` is derived from the schema's `connections` list via `buildRuleMap` (`components/canvas/edgeValidation.ts`) and used to allow/reject drag-to-connect on the canvas client-side (mirroring, not replacing, server-side validation).
 - `api/client.ts` — the only place that talks to the REST API; typed wrappers, one `ApiError` with an optional `issues` array pass-through from the server's validation errors.
-- `components/canvas/` — React Flow canvas: `GraphCanvas` (nodes/edges rendering + connect/move handlers), `GenericNode` (generic per-type node renderer), `ContainerNode` (the visual-only `containerId` grouping).
-- `components/properties/` — the node inspector/edit form: `PropertyPanel` → `PropertyForm` → `FieldRenderer`/`ArrayField`/`RefSelectField`, driven by `schema/nodeSchemas.ts` (per-type field definitions used to render the right input for each `props` field, including ref-picker fields).
+- `components/canvas/refEdges.ts` — turns `schema.refFields` into canvas ports, Unity Shader-Graph style, entirely client-side (never persisted as `graph.edges`): a single-value ref field (`table.dbId`) renders as a labeled INPUT port on the holder's left (`buildRefPortRules`/`RefPortRules.inputs`), and the referenced type gets one generic OUTPUT port on its right (`RefPortRules.outputs`, handle id `REF_OUTPUT_HANDLE`) that anything holding a matching field can wire into. An array-shaped `x[].y` ref field (currently only `returns[].chainToId` on `middleware`/`operation`) instead gives the holder one OUTPUT port *per array item* (`buildArrayRefPorts`, handle id via `chainPortHandle`), each optionally wired into a shared generic INPUT port (`CHAIN_INPUT_HANDLE`) on every type in `buildChainTargetTypes` (middleware/service/errorHandler). `synthesizeRefEdges`/`synthesizeChainEdges` derive the actual dashed preview edges from current prop values each render, deduped against real hierarchy edges connecting the same pair. `GraphCanvas.tsx`'s `isValidConnection`/`handleConnect` branch on `connection.targetHandle` to route a drag/quick-add to the right prop write.
+- `components/canvas/` — React Flow canvas: `GraphCanvas` (nodes/edges rendering + connect/move handlers + the port wiring above), `GenericNode` (generic per-type node renderer, renders the port rows), `ContainerNode` (the visual-only `containerId` grouping, shared by `container`/`boundary`), `NoteNode` (the `note` sticky).
+- `components/properties/` — the node inspector/edit form: `PropertyPanel` (also computes `inheritedReturns` — the middleware-chain + service-errors aggregate for `endpoint`/`operation`, since a middleware can short-circuit or call `next()` and let the endpoint/operation send the final code) → `PropertyForm` (has type-specific field overrides, e.g. filtering an `operation`'s method options to what's still free on the parent endpoint, or swapping a `model`'s freeform `schema` editor for a checklist of its linked `table`'s columns) → `FieldRenderer`/`ArrayField`/`RefSelectField`, driven by `schema/nodeSchemas.ts` (per-type field definitions used to render the right input for each `props` field, including ref-picker fields).
 - `components/palette/`, `components/layout/` — node palette (create-node drag source, scoped to current tab's node types) and top-level layout (`Tabs` for backend/frontend/overview, `Toolbar` for validate/export actions).
 - `client/src/types/graph.ts` is a hand-kept copy of `src/types/graph.ts` (client has no build-time access to the server's `src/`) — when changing the graph data model, update both.
 
@@ -97,6 +102,7 @@ These encode the intended workflow contract (e.g. "never silently delete nodes t
 - Backend source (`src/`) compiles under `NodeNext` module resolution — internal imports use explicit `.js` extensions (e.g. `from "../store/project-store.js"`) even though the source files are `.ts`.
 - Tests live next to source as `*.test.ts` (Vitest, `environment: "node"`); there is no separate `test/` directory.
 - Some CLI-facing strings (wizard prompts, template labels/descriptions) are in Spanish; code identifiers, types, and comments are in English. Match whichever you're editing.
+- Theming (`client/src/styles/global.css`) supports both `prefers-color-scheme: dark` and an explicit `data-theme="dark"|"light"` override via CSS vars. React Flow ships its own light-only stylesheet whose controls/minimap/attribution have a fixed near-white background while their icons inherit `currentColor` from our theme — any new React Flow chrome needs an explicit `--color-*`-based override in `global.css` (see the `.react-flow__controls-button` block) or it goes invisible in dark mode. Edges default to `type: "smoothstep"` (`defaultEdgeOptions` on `<ReactFlow>`) to keep multi-port nodes from turning into a bezier tangle.
 
 ## Approach
 - Think before acting. Read existing files before writing code.

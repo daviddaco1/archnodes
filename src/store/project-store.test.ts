@@ -66,6 +66,28 @@ describe("connectNodes", () => {
     const redisKey = store.createNode("redisKey", { keyPattern: "session:*", operation: "SET", toolId: tool.id });
     expect(() => store.connectNodes(page.id, redisKey.id, "invalidates")).toThrow(ValidationError);
   });
+
+  it("does not duplicate an edge already connecting the same pair with the same type", () => {
+    const domain = store.createNode("domain", { name: "Auth" });
+    const route = store.createNode("route", { path: "/login" });
+    const first = store.connectNodes(domain.id, route.id);
+    const second = store.connectNodes(domain.id, route.id);
+    expect(second.id).toBe(first.id);
+    expect(store.getProject("all").edges).toHaveLength(1);
+  });
+
+  it("reparenting a child drops its old hierarchy edge", () => {
+    const domainA = store.createNode("domain", { name: "A" });
+    const domainB = store.createNode("domain", { name: "B" });
+    const route = store.createNode("route", { path: "/x" });
+    store.connectNodes(domainA.id, route.id);
+    store.connectNodes(domainB.id, route.id);
+
+    const hierarchyEdges = store.getProject("all").edges.filter((e) => e.edgeType === "hierarchy" && e.target === route.id);
+    expect(hierarchyEdges).toHaveLength(1);
+    expect(hierarchyEdges[0].source).toBe(domainB.id);
+    expect(store.getNode(route.id)?.parentId).toBe(domainB.id);
+  });
 });
 
 describe("deleteEdge", () => {
@@ -105,19 +127,18 @@ describe("setPosition / setContainer", () => {
 });
 
 describe("validateProject", () => {
-  it("flags a broken ref end to end", () => {
+  it("clears a ref to a deleted node instead of leaving it dangling", () => {
     const domain = store.createNode("domain", { name: "Auth" });
     const route = store.createNode("route", { path: "/login" }, domain.id);
     const endpoint = store.createNode("endpoint", { name: "login", methods: ["POST"] }, route.id);
     const page = store.createNode("page", { name: "LoginPage", path: "/login" });
     const form = store.createNode("form", { name: "LoginForm", fields: [{ name: "email", type: "string" }] }, page.id);
     const apiCall = store.createNode("apiCall", { name: "loginCall", endpointRef: endpoint.id }, form.id);
-    void apiCall;
 
     store.deleteNode(endpoint.id);
+    expect((store.getNode(apiCall.id)?.props as Record<string, unknown>).endpointRef).toBeUndefined();
     const result = store.validateProject();
-    expect(result.valid).toBe(false);
-    expect(result.issues.some((i) => i.code === "BROKEN_REF")).toBe(true);
+    expect(result.issues.some((i) => i.code === "BROKEN_REF")).toBe(false);
   });
 });
 
@@ -144,6 +165,19 @@ describe("deleteNode", () => {
 
     const validation = store.validateProject();
     expect(validation.issues.some((i) => i.code === "INVALID_HIERARCHY")).toBe(false);
+  });
+});
+
+describe("getProject scoping", () => {
+  it("keeps structural nodes (container/boundary/note) in backend and frontend scopes", () => {
+    const container = store.createNode("container", { label: "Docker" });
+    const boundary = store.createNode("boundary", { label: "Trust boundary" });
+    const note = store.createNode("note", { text: "todo" });
+
+    for (const scope of ["backend", "frontend"] as const) {
+      const ids = store.getProject(scope).nodes.map((n) => n.id);
+      expect(ids).toEqual(expect.arrayContaining([container.id, boundary.id, note.id]));
+    }
   });
 });
 

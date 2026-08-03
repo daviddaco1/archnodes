@@ -143,6 +143,58 @@ describe("exportMarkdown", () => {
     void openEndpoint;
   });
 
+  it("does not render the endpoint's own chain when it has operation children", () => {
+    const domain = store.createNode("domain", { name: "Auth" });
+    const route = store.createNode("route", { path: "/x" }, domain.id);
+    const endpoint = store.createNode("endpoint", { name: "x", methods: ["GET"] }, route.id);
+    store.createNode("middleware", { name: "authGuard" }, endpoint.id);
+    store.createNode("operation", { method: "GET" }, endpoint.id);
+
+    const graph = store.getProject("all");
+    const md = exportMarkdown(graph, store.validateProject());
+    expect(md).not.toContain("**Middleware chain**");
+  });
+
+  it("labels an operation's own returns as coming from the operation, not the endpoint", () => {
+    buildLoginFixture();
+    const graph = store.getProject("all");
+    const md = exportMarkdown(graph, store.validateProject());
+    expect(md).toContain("| 200 | operation | OK |");
+    expect(md).not.toContain("| 200 | endpoint | OK |");
+  });
+
+  it("keeps a service sibling next to a middleware sibling instead of dropping it", () => {
+    const domain = store.createNode("domain", { name: "Auth" });
+    const route = store.createNode("route", { path: "/x" }, domain.id);
+    const endpoint = store.createNode("endpoint", { name: "x", methods: ["GET"] }, route.id);
+    store.createNode("middleware", { name: "authGuard" }, endpoint.id);
+    store.createNode("service", { name: "XService" }, endpoint.id);
+
+    const graph = store.getProject("all");
+    const md = exportMarkdown(graph, store.validateProject());
+    expect(md).toContain("**Service**");
+    expect(md).toContain("- XService");
+  });
+
+  it("scopes floating infra sections to the requested domainId", () => {
+    const domainA = store.createNode("domain", { name: "A" });
+    const routeA = store.createNode("route", { path: "/a" }, domainA.id);
+    const endpointA = store.createNode("endpoint", { name: "a", methods: ["GET"] }, routeA.id);
+    const serviceA = store.createNode("service", { name: "ServiceA" }, endpointA.id);
+    store.createNode("tool", { name: "ToolA" }, serviceA.id);
+
+    const domainB = store.createNode("domain", { name: "B" });
+    const routeB = store.createNode("route", { path: "/b" }, domainB.id);
+    const endpointB = store.createNode("endpoint", { name: "b", methods: ["GET"] }, routeB.id);
+    const serviceB = store.createNode("service", { name: "ServiceB" }, endpointB.id);
+    store.createNode("tool", { name: "ToolB" }, serviceB.id);
+
+    const graph = store.getProject("all");
+    const md = exportMarkdown(graph, store.validateProject(), domainA.id);
+    expect(md).toContain("ToolA");
+    expect(md).not.toContain("ToolB");
+  });
+
   it("renders each operation child with its own params and chain", () => {
     const domain = store.createNode("domain", { name: "Auth" });
     const route = store.createNode("route", { path: "/users" }, domain.id);
@@ -168,12 +220,13 @@ describe("exportMarkdown", () => {
     expect(md).toContain("| 409 |");
   });
 
-  it("reports a broken ref as a warning", () => {
+  it("reports a missing field left behind by a cleared ref as a warning", () => {
     const { endpoint } = buildLoginFixture();
     store.deleteNode(endpoint.id, true);
     const graph = store.getProject("all");
     const md = exportMarkdown(graph, store.validateProject());
-    expect(md).toContain("[BROKEN REF]");
+    expect(md).toContain("[MISSING FIELD]");
+    expect(md).not.toContain("[BROKEN REF]");
   });
 });
 
@@ -189,5 +242,9 @@ describe("toYamlBlock", () => {
   });
   it("renders an array of objects", () => {
     expect(toYamlBlock([{ a: 1 }, { a: 2 }])).toBe("- a: 1\n- a: 2\n");
+  });
+  it("renders an undefined nested scalar as null, consistent with a null value", () => {
+    expect(toYamlBlock({ a: undefined })).toBe("a: null\n");
+    expect(toYamlBlock({ a: null })).toBe("a: null\n");
   });
 });

@@ -39,6 +39,34 @@ describe("REST API", () => {
     expect(body.id).toBeTruthy();
   });
 
+  it("rejects a node creation missing type or props", async () => {
+    const res = await fetch(`${baseUrl}/api/nodes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ props: { name: "Auth" } }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("filters nodes by type and props via /api/nodes", async () => {
+    await fetch(`${baseUrl}/api/nodes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "domain", props: { name: "Auth" } }),
+    });
+    await fetch(`${baseUrl}/api/nodes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "domain", props: { name: "Billing" } }),
+    });
+
+    const filters = encodeURIComponent(JSON.stringify({ name: "Billing" }));
+    const res = await fetch(`${baseUrl}/api/nodes?type=domain&filters=${filters}`);
+    const body = await res.json();
+    expect(body).toHaveLength(1);
+    expect(body[0].props.name).toBe("Billing");
+  });
+
   it("rejects a node with an invalid hierarchy", async () => {
     const domainRes = await fetch(`${baseUrl}/api/nodes`, {
       method: "POST",

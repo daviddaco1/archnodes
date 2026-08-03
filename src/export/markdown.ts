@@ -24,6 +24,7 @@ import { validateProjectGraph, type ValidationIssue, type ValidationResult } fro
 // ---- YAML (manual emitter, no js-yaml — the input is always our own plain data) ----
 
 function formatScalar(value: unknown): string {
+  if (value === undefined || value === null) return "null";
   if (typeof value === "string") return value;
   return JSON.stringify(value);
 }
@@ -121,13 +122,13 @@ function resolveChain(endpointId: string, edges: GraphEdge[], nodesById: Map<str
     const children = hierarchyChildren(currentId, edges, nodesById);
     const middleware = children.find((c) => c.type === "middleware");
     const svc = children.find((c) => c.type === "service");
+    // A service sibling next to a middleware is still recorded — the middleware descent below
+    // doesn't get to silently drop it just because it's not the branch we're walking into.
+    if (svc && !service) service = svc;
     if (middleware) {
       middlewares.push(middleware);
       currentId = middleware.id;
       continue;
-    }
-    if (svc) {
-      service = svc;
     }
     break;
   }
@@ -178,7 +179,13 @@ interface ReturnRow {
 
 // Shared by the endpoint's own (implicit) chain and by each explicit operation child — walks
 // middleware/service starting at `startId` and renders the chain + aggregated returns table.
-function renderChain(startId: string, ownReturns: ReturnSpec[] | undefined, edges: GraphEdge[], nodesById: Map<string, AnyGraphNode>): string {
+function renderChain(
+  startId: string,
+  ownReturns: ReturnSpec[] | undefined,
+  sourceLabel: string,
+  edges: GraphEdge[],
+  nodesById: Map<string, AnyGraphNode>,
+): string {
   const parts: string[] = [];
   const { middlewares, service } = resolveChain(startId, edges, nodesById);
 
@@ -199,7 +206,7 @@ function renderChain(startId: string, ownReturns: ReturnSpec[] | undefined, edge
 
   const returnRows: ReturnRow[] = [];
   for (const r of ownReturns ?? [])
-    returnRows.push({ status: r.status, source: "endpoint", description: `${r.description ?? ""}${r.chainToId ? ` → chains to \`${r.chainToId}\`` : ""}`.trim() });
+    returnRows.push({ status: r.status, source: sourceLabel, description: `${r.description ?? ""}${r.chainToId ? ` → chains to \`${r.chainToId}\`` : ""}`.trim() });
   for (const mw of middlewares) {
     const mwProps = mw.props as MiddlewareProps;
     for (const r of mwProps.returns ?? [])
@@ -225,7 +232,7 @@ function renderOperation(node: AnyGraphNode, edges: GraphEdge[], nodesById: Map<
   parts.push(renderParamTable("Query", props.query));
   parts.push(renderParamTable("Path params", props.params));
   parts.push(renderParamTable("Body", props.body));
-  parts.push(renderChain(node.id, props.returns, edges, nodesById));
+  parts.push(renderChain(node.id, props.returns, "operation", edges, nodesById));
   return parts.join("\n") + "\n";
 }
 
@@ -244,7 +251,11 @@ function renderEndpoint(node: AnyGraphNode, headerLevel: number, edges: GraphEdg
     "",
   );
   parts.push(renderParamTable("Headers", props.headers));
-  parts.push(renderChain(node.id, undefined, edges, nodesById));
+
+  const operations = hierarchyChildren(node.id, edges, nodesById).filter((c) => c.type === "operation");
+  // An endpoint with operation children delegates its middleware/service chain rendering to
+  // each operation's own chain — rendering it here too would show the same chain twice.
+  if (operations.length === 0) parts.push(renderChain(node.id, undefined, "endpoint", edges, nodesById));
 
   if (props.cacheable?.enabled) {
     parts.push(
@@ -258,7 +269,6 @@ function renderEndpoint(node: AnyGraphNode, headerLevel: number, edges: GraphEdg
     );
   }
 
-  const operations = hierarchyChildren(node.id, edges, nodesById).filter((c) => c.type === "operation");
   for (const op of operations) parts.push(renderOperation(op, edges, nodesById));
 
   return parts.join("\n") + "\n";
@@ -450,7 +460,16 @@ export function exportMarkdown(graph: ProjectGraph, validation?: ValidationResul
   if (hasBackend) {
     parts.push("## Backend", "");
     for (const domain of domains) parts.push(renderDomain(domain, graph.edges, nodesById));
-    parts.push(renderInfraSections(graph.nodes, graph.edges, nodesById));
+
+    let infraNodes = graph.nodes;
+    if (domainId) {
+      const scopedIds = new Set(domains.map((d) => d.id));
+      for (const domain of domains) {
+        for (const descendant of collectDescendants(domain.id, graph.edges, nodesById)) scopedIds.add(descendant.id);
+      }
+      infraNodes = graph.nodes.filter((n) => scopedIds.has(n.id));
+    }
+    parts.push(renderInfraSections(infraNodes, graph.edges, nodesById));
   }
 
   const hasFrontend = graph.nodes.some((n) => n.type === "page" || n.type === "navigationRouter" || n.type === "stateStore");

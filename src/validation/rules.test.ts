@@ -160,6 +160,45 @@ describe("validateRefs", () => {
     ];
     expect(validateRefs(goodNodes)).toHaveLength(0);
   });
+
+  it("validates repository.entityRef", () => {
+    const badNodes = [node("rp1", "repository", { name: "UserRepo", entityRef: "missing", ormId: "o1" })];
+    expect(validateRefs(badNodes).some((i) => i.code === "BROKEN_REF" && i.field === "entityRef")).toBe(true);
+
+    const goodNodes = [
+      node("o1", "orm", { name: "prisma" }),
+      node("t1", "table", { name: "users", columns: [] }),
+      node("rp1", "repository", { name: "UserRepo", entityRef: "t1", ormId: "o1" }),
+    ];
+    expect(validateRefs(goodNodes)).toHaveLength(0);
+  });
+
+  it("validates layout.slots[].componentId", () => {
+    const badNodes = [
+      node("l1", "layout", { name: "MainLayout", slots: [{ name: "header", componentId: "missing" }] }),
+    ];
+    expect(validateRefs(badNodes)[0].code).toBe("BROKEN_REF");
+
+    const goodNodes = [
+      node("c1", "component", { name: "Header", kind: "presentational" }),
+      node("l1", "layout", { name: "MainLayout", slots: [{ name: "header", componentId: "c1" }] }),
+    ];
+    expect(validateRefs(goodNodes)).toHaveLength(0);
+  });
+
+  it("validates chainToId inside service.errors[] and email.errors[]", () => {
+    const badService = [node("s1", "service", { name: "Billing", errors: [{ status: "fail", chainToId: "missing" }] })];
+    expect(validateRefs(badService)[0].code).toBe("BROKEN_REF");
+
+    const goodService = [
+      node("eh1", "errorHandler", { name: "GlobalHandler", scope: "global" }),
+      node("s1", "service", { name: "Billing", errors: [{ status: "fail", chainToId: "eh1" }] }),
+    ];
+    expect(validateRefs(goodService)).toHaveLength(0);
+
+    const badEmail = [node("em1", "email", { trigger: "signup", errors: [{ status: "fail", chainToId: "missing" }] })];
+    expect(validateRefs(badEmail)[0].code).toBe("BROKEN_REF");
+  });
 });
 
 describe("validateProjectGraph", () => {

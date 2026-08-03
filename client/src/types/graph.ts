@@ -164,7 +164,6 @@ export interface DbProps {
 
 export interface OrmProps {
   name: "prisma" | "typeorm" | "sequelize" | "mongoose" | "drizzle" | string;
-  dbId: string;
 }
 
 export interface RepositoryProps {
