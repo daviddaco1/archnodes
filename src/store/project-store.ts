@@ -18,6 +18,7 @@ import {
   canConnectSpecial,
   validateProjectGraph,
   validateRefs,
+  type ValidationIssue,
   type ValidationResult,
 } from "../validation/rules.js";
 
@@ -43,6 +44,7 @@ export interface ProjectStore {
   updateManifest(patch: Partial<Omit<ProjectGraph["manifest"], "projectName" | "createdAt">>): void;
   deleteNode(id: string, cascade?: boolean): DeleteResult;
   connectNodes(sourceId: string, targetId: string, edgeType?: EdgeType): GraphEdge;
+  deleteEdge(id: string): void;
   importGraph(nodes: AnyGraphNode[], edges: GraphEdge[], mode: "merge" | "replace"): void;
   validateProject(): ValidationResult;
 }
@@ -97,6 +99,48 @@ export function createProjectStore(projectName: string, opts: ProjectStoreOption
     // (surfaced by validate_project(), same as import_graph's already-documented partial-data path)
     // rather than blocking node creation entirely.
     const issues = validateRefs(allNodes).filter((i) => i.nodeId === candidate.id);
+    if (issues.length > 0) throw new ValidationError(issues);
+  }
+
+  // Same "actively corrupts data" bar as assertValidNode: a method outside the endpoint's
+  // declared list, or a method that collides with a sibling operation, is rejected outright.
+  function assertValidOperationMethod(candidate: AnyGraphNode, allNodes: AnyGraphNode[], parentIdOverride?: string): void {
+    if (candidate.type !== "operation") return;
+    const parentId = parentIdOverride ?? candidate.parentId;
+    const method = (candidate.props as unknown as Record<string, unknown>).method as string | undefined;
+    if (!parentId || !method) return;
+
+    const issues: ValidationIssue[] = [];
+    const endpoint = allNodes.find((n) => n.id === parentId);
+    const allowedMethods =
+      endpoint?.type === "endpoint"
+        ? ((endpoint.props as unknown as Record<string, unknown>).methods as string[] | undefined)
+        : undefined;
+    if (allowedMethods && !allowedMethods.includes(method)) {
+      issues.push({
+        level: "error",
+        code: "INVALID_OPERATION_METHOD",
+        nodeId: candidate.id,
+        field: "method",
+        message: `Method "${method}" is not declared in the parent endpoint's methods [${allowedMethods.join(", ")}]`,
+      });
+    }
+    const collides = allNodes.some(
+      (n) =>
+        n.type === "operation" &&
+        n.id !== candidate.id &&
+        n.parentId === parentId &&
+        (n.props as unknown as Record<string, unknown>).method === method,
+    );
+    if (collides) {
+      issues.push({
+        level: "error",
+        code: "DUPLICATE_OPERATION_METHOD",
+        nodeId: candidate.id,
+        field: "method",
+        message: `Another operation under the same endpoint already uses method "${method}"`,
+      });
+    }
     if (issues.length > 0) throw new ValidationError(issues);
   }
 
@@ -158,6 +202,7 @@ export function createProjectStore(projectName: string, opts: ProjectStoreOption
       } as AnyGraphNode;
 
       assertValidNode(node, [...graph.nodes, node]);
+      if (parentId) assertValidOperationMethod(node, [...graph.nodes, node], parentId);
       graph.nodes.push(node);
       if (parentId) {
         try {
@@ -180,7 +225,9 @@ export function createProjectStore(projectName: string, opts: ProjectStoreOption
       const node = requireNode(id);
       const merged = { ...(node.props as Record<string, unknown>), ...(props as Record<string, unknown>) };
       const candidate = { ...node, props: merged } as AnyGraphNode;
-      assertValidNode(candidate, graph.nodes.map((n) => (n.id === id ? candidate : n)));
+      const allNodes = graph.nodes.map((n) => (n.id === id ? candidate : n));
+      assertValidNode(candidate, allNodes);
+      assertValidOperationMethod(candidate, allNodes);
       node.props = merged as never;
       node.updatedAt = now();
       if (typeof merged.name === "string") node.label = merged.name;
@@ -255,6 +302,20 @@ export function createProjectStore(projectName: string, opts: ProjectStoreOption
       }
       persist();
       return edge;
+    },
+
+    deleteEdge(id: string) {
+      const edge = graph.edges.find((e) => e.id === id);
+      if (!edge) return;
+      graph.edges = graph.edges.filter((e) => e.id !== id);
+      if (edge.edgeType === "hierarchy") {
+        const target = findNode(edge.target);
+        if (target && target.parentId === edge.source) {
+          target.parentId = undefined;
+          target.updatedAt = now();
+        }
+      }
+      persist();
     },
 
     importGraph(nodes: AnyGraphNode[], edges: GraphEdge[], mode: "merge" | "replace") {

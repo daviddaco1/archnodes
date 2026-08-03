@@ -1,17 +1,69 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useGraph } from "../../context/GraphContext";
 import { nodeSchemas } from "../../schema/nodeSchemas";
 import { defaultCompanionProps } from "../../schema/companionDefaults";
 import { edgeKind } from "../canvas/edgeValidation";
 import * as api from "../../api/client";
-import type { NodeType } from "../../types/graph";
+import type { AnyGraphNode, GraphEdge, MiddlewareProps, NodeType, ServiceProps, SubdomainProps } from "../../types/graph";
 import { PropertyForm } from "./PropertyForm";
 import styles from "./PropertyPanel.module.css";
+
+function resolveEndpointChain(
+  endpointId: string,
+  nodes: AnyGraphNode[],
+  edges: GraphEdge[],
+): { middlewares: AnyGraphNode[]; service?: AnyGraphNode } {
+  const nodesById = new Map(nodes.map((n) => [n.id, n]));
+  const childrenOf = (id: string) =>
+    edges.filter((e) => e.edgeType === "hierarchy" && e.source === id).map((e) => nodesById.get(e.target)).filter((n): n is AnyGraphNode => Boolean(n));
+
+  const middlewares: AnyGraphNode[] = [];
+  let service: AnyGraphNode | undefined;
+  let currentId = endpointId;
+  for (let i = 0; i < nodes.length; i++) {
+    const children = childrenOf(currentId);
+    const mw = children.find((c) => c.type === "middleware");
+    const svc = children.find((c) => c.type === "service");
+    if (mw) {
+      middlewares.push(mw);
+      currentId = mw.id;
+      continue;
+    }
+    if (svc) service = svc;
+    break;
+  }
+  return { middlewares, service };
+}
 
 export function PropertyPanel() {
   const { nodes, edges, connectionRules, selectedNodeId, setSelectedNodeId, refetch } = useGraph();
   const [cascade, setCascade] = useState(false);
   const node = nodes.find((n) => n.id === selectedNodeId);
+
+  const inheritedReturns = useMemo(() => {
+    if (!node || node.type !== "endpoint") return [];
+    const { middlewares, service } = resolveEndpointChain(node.id, nodes, edges);
+    const rows: { status: string | number; description?: string; source: string }[] = [];
+    for (const mw of middlewares) {
+      const mwProps = mw.props as MiddlewareProps;
+      for (const r of mwProps.returns ?? []) rows.push({ status: r.status, description: r.description, source: `middleware:${mwProps.name}` });
+    }
+    if (service) {
+      const svcProps = service.props as ServiceProps;
+      for (const r of svcProps.errors ?? []) rows.push({ status: r.status, description: r.description, source: `service:${svcProps.name}` });
+    }
+    return rows;
+  }, [node, nodes, edges]);
+
+  const subdomainPreview = useMemo(() => {
+    if (!node || node.type !== "subdomain") return null;
+    const props = node.props as SubdomainProps;
+    if (!props.subdomain) return null;
+    const domainNode = nodes.find((n) => n.id === props.domainId);
+    const domainValue = domainNode && (domainNode.props as { domain?: string }).domain;
+    if (!domainValue) return null;
+    return `${props.subdomain}.${domainValue}`;
+  }, [node, nodes]);
 
   if (!node) {
     return (
@@ -69,6 +121,27 @@ export function PropertyPanel() {
       </div>
 
       <PropertyForm node={node} onSaved={refetch} />
+
+      {subdomainPreview && (
+        <div className={styles.preview}>
+          Se vería como <span className="mono">{subdomainPreview}</span>
+        </div>
+      )}
+
+      {inheritedReturns.length > 0 && (
+        <div className={styles.preview}>
+          <div style={{ marginBottom: 6, fontWeight: 500 }}>Outputs heredados (middleware / service)</div>
+          {inheritedReturns.map((r, i) => (
+            <div key={i} style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+              <span className="mono">{r.status}</span>
+              <span style={{ color: "var(--color-text-muted)", flex: 1 }}>{r.description}</span>
+              <span className="mono" style={{ fontSize: 10, color: "var(--color-text-faint)" }}>
+                {r.source}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
 
       {missingCompanions.length > 0 && (
         <div className={styles.suggestions}>

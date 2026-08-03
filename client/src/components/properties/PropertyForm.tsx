@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { nodeSchemas } from "../../schema/nodeSchemas";
 import type { AnyGraphNode } from "../../types/graph";
 import { FieldRenderer } from "./FieldRenderer";
+import { useGraph } from "../../context/GraphContext";
 import * as api from "../../api/client";
 
 interface PropertyFormProps {
@@ -14,17 +15,65 @@ export function PropertyForm({ node, onSaved }: PropertyFormProps) {
   const [draft, setDraft] = useState<Record<string, unknown>>(node.props as Record<string, unknown>);
   const draftRef = useRef(draft);
   draftRef.current = draft;
+  const { nodes, focusField, setFocusField } = useGraph();
+  const fieldRefs = useRef<Record<string, HTMLDivElement | null>>({});
+
+  // An operation's method must stay inside the parent endpoint's declared methods and can't
+  // collide with a sibling operation's method — narrow the select's options accordingly.
+  let fields =
+    node.type === "operation"
+      ? schema.fields.map((field) => {
+          if (field.key !== "method") return field;
+          const endpoint = nodes.find((n) => n.id === node.parentId);
+          const allowed =
+            endpoint?.type === "endpoint" ? (endpoint.props as { methods?: string[] }).methods : undefined;
+          const usedBySiblings = new Set(
+            nodes
+              .filter((n) => n.type === "operation" && n.id !== node.id && n.parentId === node.parentId)
+              .map((n) => (n.props as { method?: string }).method)
+              .filter((m): m is string => Boolean(m)),
+          );
+          const options = (allowed ?? field.options ?? []).filter((m) => !usedBySiblings.has(m));
+          return { ...field, options };
+        })
+      : schema.fields;
+
+  // authMethods only makes sense while the endpoint isn't marked public — matches the checkbox:
+  // unchecked (false/unset) reads as "not public yet", checked hides the security fields.
+  if (node.type === "endpoint" && draft.isPublic === true) {
+    fields = fields.filter((field) => field.key !== "authMethods");
+  }
 
   useEffect(() => {
     setDraft(node.props as Record<string, unknown>);
   }, [node.id, node.props]);
 
+  useEffect(() => {
+    if (!focusField) return;
+    const el = fieldRefs.current[focusField];
+    el?.scrollIntoView({ behavior: "smooth", block: "center" });
+    const timeout = setTimeout(() => setFocusField(null), 1600);
+    return () => clearTimeout(timeout);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusField, node.id]);
+
   const handleChange = (key: string, value: unknown) => {
     setDraft((prev) => ({ ...prev, [key]: value }));
   };
 
+  const [saveError, setSaveError] = useState<string | null>(null);
+
   const commit = () => {
-    void api.updateNode(node.id, draftRef.current).then(onSaved).catch((err) => console.error(err));
+    void api
+      .updateNode(node.id, draftRef.current)
+      .then(() => {
+        setSaveError(null);
+        onSaved();
+      })
+      .catch((err) => {
+        setDraft(node.props as Record<string, unknown>);
+        setSaveError(err instanceof Error ? err.message : String(err));
+      });
   };
 
   if (schema.fields.length === 0) {
@@ -33,8 +82,18 @@ export function PropertyForm({ node, onSaved }: PropertyFormProps) {
 
   return (
     <form onBlur={commit} onSubmit={(e) => e.preventDefault()}>
-      {schema.fields.map((field) => (
-        <div key={field.key} style={{ marginBottom: 10 }}>
+      {saveError && (
+        <p style={{ fontSize: 12, color: "var(--color-danger, #e53e3e)", marginBottom: 10 }}>{saveError}</p>
+      )}
+      {fields.map((field) => (
+        <div
+          key={field.key}
+          ref={(el) => {
+            fieldRefs.current[field.key] = el;
+          }}
+          className={focusField === field.key ? "field-flash" : undefined}
+          style={{ marginBottom: 10 }}
+        >
           <label style={{ display: "block", fontSize: 12, marginBottom: 4 }}>{field.label}</label>
           <FieldRenderer field={field} value={draft[field.key]} onChange={(v) => handleChange(field.key, v)} />
         </div>

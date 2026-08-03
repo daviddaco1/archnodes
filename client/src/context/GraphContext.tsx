@@ -2,18 +2,22 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState, t
 import { getProject, getSchema, type SchemaResponse } from "../api/client";
 import type { AnyGraphNode, GraphEdge, ProjectManifest } from "../types/graph";
 import { buildRuleMap, type ConnectionRules } from "../components/canvas/edgeValidation";
+import { buildRefEdgeRules, type RefEdgeRules } from "../components/canvas/refEdges";
 
 interface GraphContextValue {
   nodes: AnyGraphNode[];
   edges: GraphEdge[];
   manifest?: ProjectManifest;
   connectionRules: ConnectionRules;
+  refEdgeRules: RefEdgeRules;
   schema?: SchemaResponse;
   loading: boolean;
   error: string | null;
   refetch: () => Promise<void>;
   selectedNodeId: string | null;
   setSelectedNodeId: (id: string | null) => void;
+  focusField: string | null;
+  setFocusField: (field: string | null) => void;
 }
 
 const GraphContext = createContext<GraphContextValue | undefined>(undefined);
@@ -26,6 +30,7 @@ export function GraphProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [focusField, setFocusField] = useState<string | null>(null);
 
   const refetch = useCallback(async () => {
     try {
@@ -47,18 +52,22 @@ export function GraphProvider({ children }: { children: ReactNode }) {
   }, [refetch]);
 
   const connectionRules = useMemo(() => buildRuleMap(schema?.connections ?? []), [schema]);
+  const refEdgeRules = useMemo(() => buildRefEdgeRules(schema?.refFields), [schema]);
 
   const value: GraphContextValue = {
     nodes,
     edges,
     manifest,
     connectionRules,
+    refEdgeRules,
     schema,
     loading,
     error,
     refetch,
     selectedNodeId,
     setSelectedNodeId,
+    focusField,
+    setFocusField,
   };
 
   return <GraphContext.Provider value={value}>{children}</GraphContext.Provider>;

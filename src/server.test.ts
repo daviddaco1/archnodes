@@ -88,6 +88,37 @@ describe("REST API", () => {
     expect(invalidEdge.status).toBe(400);
   });
 
+  it("deletes an edge and clears the target's parentId", async () => {
+    const domain = await (
+      await fetch(`${baseUrl}/api/nodes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "domain", props: { name: "Auth" } }),
+      })
+    ).json();
+    const route = await (
+      await fetch(`${baseUrl}/api/nodes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "route", props: { path: "/login" } }),
+      })
+    ).json();
+    const edge = await (
+      await fetch(`${baseUrl}/api/edges`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sourceId: domain.id, targetId: route.id }),
+      })
+    ).json();
+
+    const del = await fetch(`${baseUrl}/api/edges/${edge.id}`, { method: "DELETE" });
+    expect(del.status).toBe(204);
+
+    const project = await (await fetch(`${baseUrl}/api/project`)).json();
+    expect(project.edges).toHaveLength(0);
+    expect(project.nodes.find((n: { id: string }) => n.id === route.id).parentId).toBeUndefined();
+  });
+
   it("cascade-deletes descendants", async () => {
     const domain = await (
       await fetch(`${baseUrl}/api/nodes`, {

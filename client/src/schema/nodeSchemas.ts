@@ -1,5 +1,18 @@
 import type { NodeType } from "../types/graph";
-import type { NodeTypeSchema } from "./fieldTypes";
+import type { FieldDef, NodeTypeSchema } from "./fieldTypes";
+
+// Shared item schemas so query/params/body/headers/returns don't repeat their shape 4-5 times.
+const paramItemSchema: FieldDef[] = [
+  { key: "name", label: "Nombre", kind: "text" },
+  { key: "type", label: "Tipo", kind: "select", options: ["string", "number", "boolean", "date", "object"] },
+  { key: "required", label: "Requerido", kind: "boolean" },
+];
+
+const returnsItemSchema: FieldDef[] = [
+  { key: "status", label: "Status", kind: "text", placeholder: "200 / 401" },
+  { key: "description", label: "Mensaje", kind: "text" },
+  { key: "chainToId", label: "Encadenar a", kind: "refSelect", refNodeType: ["middleware", "service", "errorHandler"] },
+];
 
 // Declarative UI metadata for every node type: this is presentation (color/icon/form layout),
 // not a business rule the backend validates — that's why it lives here as static client data
@@ -11,9 +24,10 @@ export const nodeSchemas: Record<NodeType, NodeTypeSchema> = {
     category: "backend",
     color: "#2c5282",
     icon: "D",
-    summaryFields: ["name"],
+    summaryFields: ["domain"],
     fields: [
       { key: "name", label: "Nombre", kind: "text" },
+      { key: "domain", label: "Dominio", kind: "text", placeholder: "andresodev.com" },
       { key: "ipPort", label: "IP:Puerto", kind: "text", placeholder: "0.0.0.0:3000" },
       { key: "description", label: "Descripción", kind: "textarea" },
     ],
@@ -23,9 +37,10 @@ export const nodeSchemas: Record<NodeType, NodeTypeSchema> = {
     category: "backend",
     color: "#2b6cb0",
     icon: "Sd",
-    summaryFields: ["name"],
+    summaryFields: ["subdomain"],
     fields: [
       { key: "name", label: "Nombre", kind: "text" },
+      { key: "subdomain", label: "Subdominio", kind: "text", placeholder: "api" },
       { key: "domainId", label: "Domain", kind: "refSelect", refNodeType: "domain" },
       { key: "description", label: "Descripción", kind: "textarea" },
     ],
@@ -46,24 +61,62 @@ export const nodeSchemas: Record<NodeType, NodeTypeSchema> = {
     category: "backend",
     color: "#2b6cb0",
     icon: "E",
-    summaryFields: ["method", "name"],
+    summaryFields: ["methods", "headers"],
     fields: [
       { key: "name", label: "Nombre", kind: "text" },
+      { key: "methods", label: "Métodos", kind: "multiSelect", options: ["GET", "POST", "PUT", "PATCH", "DELETE"] },
+      { key: "description", label: "Descripción", kind: "textarea" },
+      { key: "isPublic", label: "Publica", kind: "boolean" },
+      {
+        key: "authMethods",
+        label: "Métodos de seguridad",
+        kind: "multiSelect",
+        options: ["API Key", "JWT / Bearer Token", "OAuth2", "Basic Auth", "Session Cookie", "HMAC Signature", "mTLS (certificado cliente)"],
+      },
+      { key: "headers", label: "Headers (compartidos entre métodos)", kind: "arrayOfObjects", itemSchema: paramItemSchema },
+    ],
+    suggestedCompanions: [
+      { type: "middleware", reason: "Los endpoints suelen tener al menos un middleware de validación." },
+      { type: "operation", reason: "Cada método (GET/POST/...) necesita su propio nodo Operation para definir query/body/outputs." },
+    ],
+  },
+  operation: {
+    type: "operation",
+    category: "backend",
+    color: "#1a4971",
+    icon: "Op",
+    summaryFields: ["body", "returns"],
+    fields: [
       { key: "method", label: "Método", kind: "select", options: ["GET", "POST", "PUT", "PATCH", "DELETE"] },
       { key: "description", label: "Descripción", kind: "textarea" },
+      { key: "query", label: "Query params", kind: "arrayOfObjects", itemSchema: paramItemSchema },
+      { key: "params", label: "Path params", kind: "arrayOfObjects", itemSchema: paramItemSchema },
+      { key: "body", label: "Body", kind: "arrayOfObjects", itemSchema: paramItemSchema },
+      {
+        key: "returns",
+        label: "Outputs",
+        kind: "arrayOfObjects",
+        itemSchema: returnsItemSchema,
+      },
     ],
-    suggestedCompanions: [{ type: "middleware", reason: "Los endpoints suelen tener al menos un middleware de validación." }],
+    suggestedCompanions: [{ type: "middleware", reason: "Esta operación puede tener su propio middleware de validación." }],
   },
   middleware: {
     type: "middleware",
     category: "backend",
     color: "#4299e1",
     icon: "Mw",
-    summaryFields: ["name"],
+    summaryFields: ["returns"],
     fields: [
       { key: "name", label: "Nombre", kind: "text" },
       { key: "description", label: "Descripción", kind: "textarea" },
       { key: "hasNext", label: "Llama a next()", kind: "boolean" },
+      {
+        key: "returns",
+        label: "Outputs",
+        kind: "arrayOfObjects",
+        itemSchema: returnsItemSchema,
+      },
     ],
   },
   service: {
@@ -100,6 +153,7 @@ export const nodeSchemas: Record<NodeType, NodeTypeSchema> = {
           { key: "required", label: "Requerido", kind: "boolean" },
         ],
       },
+      { key: "tableId", label: "Tabla", kind: "refSelect", refNodeType: "table" },
     ],
   },
   table: {
@@ -107,7 +161,7 @@ export const nodeSchemas: Record<NodeType, NodeTypeSchema> = {
     category: "backend",
     color: "#805ad5",
     icon: "T",
-    summaryFields: ["name"],
+    summaryFields: ["columns"],
     fields: [
       { key: "name", label: "Nombre", kind: "text" },
       {
@@ -120,6 +174,7 @@ export const nodeSchemas: Record<NodeType, NodeTypeSchema> = {
           { key: "nullable", label: "Nullable", kind: "boolean" },
         ],
       },
+      { key: "dbId", label: "DB", kind: "refSelect", refNodeType: "db" },
     ],
   },
   db: {
@@ -132,6 +187,7 @@ export const nodeSchemas: Record<NodeType, NodeTypeSchema> = {
       { key: "engine", label: "Motor", kind: "select", options: ["PostgreSQL", "MySQL", "MongoDB", "SQLite"] },
       { key: "connectionType", label: "Tipo de conexión", kind: "select", options: ["native", "orm"] },
       { key: "connectionString", label: "Connection string", kind: "text" },
+      { key: "ormId", label: "ORM", kind: "refSelect", refNodeType: "orm" },
     ],
   },
   orm: {
@@ -140,10 +196,7 @@ export const nodeSchemas: Record<NodeType, NodeTypeSchema> = {
     color: "#6b46c1",
     icon: "Or",
     summaryFields: ["name"],
-    fields: [
-      { key: "name", label: "Nombre", kind: "select", options: ["prisma", "typeorm", "sequelize", "mongoose", "drizzle"] },
-      { key: "dbId", label: "DB", kind: "refSelect", refNodeType: "db" },
-    ],
+    fields: [{ key: "name", label: "Nombre", kind: "select", options: ["prisma", "typeorm", "sequelize", "mongoose", "drizzle"] }],
   },
   repository: {
     type: "repository",
@@ -234,10 +287,38 @@ export const nodeSchemas: Record<NodeType, NodeTypeSchema> = {
     category: "backend",
     color: "#2c7a7b",
     icon: "Ws",
-    summaryFields: ["event"],
+    summaryFields: ["namespace"],
     fields: [
       { key: "name", label: "Nombre", kind: "text" },
-      { key: "event", label: "Evento", kind: "text" },
+      { key: "namespace", label: "Namespace", kind: "text", placeholder: "/chat" },
+      { key: "description", label: "Descripción", kind: "textarea" },
+    ],
+    suggestedCompanions: [{ type: "websocketEvent", reason: "Un WebSocket necesita al menos un evento que escuchar." }],
+  },
+  websocketEvent: {
+    type: "websocketEvent",
+    category: "backend",
+    color: "#285e61",
+    icon: "Ev",
+    summaryFields: ["payload"],
+    fields: [
+      { key: "event", label: "Evento entrante", kind: "text", placeholder: "message" },
+      { key: "description", label: "Descripción", kind: "textarea" },
+      { key: "payload", label: "Payload", kind: "arrayOfObjects", itemSchema: paramItemSchema },
+    ],
+    suggestedCompanions: [{ type: "websocketEmit", reason: "Un evento entrante suele emitir una respuesta." }],
+  },
+  websocketEmit: {
+    type: "websocketEmit",
+    category: "backend",
+    color: "#234e52",
+    icon: "Em",
+    summaryFields: ["target", "payload"],
+    fields: [
+      { key: "event", label: "Evento saliente", kind: "text", placeholder: "message_received" },
+      { key: "target", label: "Destino", kind: "select", options: ["sender", "broadcast", "room"] },
+      { key: "roomParam", label: "Campo con el id de sala (si destino = room)", kind: "text", placeholder: "roomId" },
+      { key: "payload", label: "Payload", kind: "arrayOfObjects", itemSchema: paramItemSchema },
     ],
   },
   email: {
@@ -439,10 +520,37 @@ export const nodeSchemas: Record<NodeType, NodeTypeSchema> = {
   container: {
     type: "container",
     category: "structure",
-    color: "transparent",
+    color: "#a0aec0",
     icon: "",
     summaryFields: [],
     fields: [{ key: "label", label: "Nombre del contenedor", kind: "text" }],
+  },
+  boundary: {
+    type: "boundary",
+    category: "structure",
+    color: "#4c6ef5",
+    icon: "",
+    summaryFields: ["kind"],
+    fields: [
+      { key: "label", label: "Nombre", kind: "text", placeholder: "Auth Service" },
+      {
+        key: "kind",
+        label: "Tipo de límite",
+        kind: "select",
+        options: ["microservice", "network-zone", "module", "bounded-context"],
+      },
+    ],
+  },
+  note: {
+    type: "note",
+    category: "structure",
+    color: "#d69e2e",
+    icon: "",
+    summaryFields: [],
+    fields: [
+      { key: "text", label: "Texto", kind: "textarea" },
+      { key: "color", label: "Color", kind: "select", options: ["yellow", "blue", "pink", "green"] },
+    ],
   },
 };
 

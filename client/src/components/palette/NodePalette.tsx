@@ -29,8 +29,8 @@ export function NodePalette({ category }: NodePaletteProps) {
         <p className={styles.groupTitle}>Estructura</p>
         {structural.map((schema) => (
           <div key={schema.type} className={styles.item} draggable onDragStart={(e) => onDragStart(e, schema.type)}>
-            <span className={styles.swatch} style={{ border: "1px dashed var(--color-text-muted)" }} />
-            <span className="mono">Contenedor</span>
+            <span className={styles.swatch} style={{ background: schema.color }} />
+            <span className="mono">{schema.type}</span>
           </div>
         ))}
       </div>

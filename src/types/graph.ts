@@ -1,22 +1,22 @@
 export type BackendNodeType =
-  | "domain" | "subdomain" | "route" | "endpoint" | "middleware" | "service"
+  | "domain" | "subdomain" | "route" | "endpoint" | "operation" | "middleware" | "service"
   | "model" | "table" | "db" | "orm" | "repository" | "tool" | "queue"
   | "externalApi" | "scheduler" | "errorHandler" | "envConfig" | "websocket"
-  | "email" | "redisKey";
+  | "websocketEvent" | "websocketEmit" | "email" | "redisKey";
 
 export type FrontendNodeType =
   | "page" | "layout" | "component" | "form" | "stateStore" | "apiCall"
   | "hook" | "navigationRouter" | "guard" | "modalDialog" | "themeToken" | "asset";
 
-export type StructuralNodeType = "container";
+export type StructuralNodeType = "container" | "boundary" | "note";
 
 export type NodeType = BackendNodeType | FrontendNodeType | StructuralNodeType;
 
 export const BACKEND_NODE_TYPES: BackendNodeType[] = [
-  "domain", "subdomain", "route", "endpoint", "middleware", "service",
+  "domain", "subdomain", "route", "endpoint", "operation", "middleware", "service",
   "model", "table", "db", "orm", "repository", "tool", "queue",
   "externalApi", "scheduler", "errorHandler", "envConfig", "websocket",
-  "email", "redisKey",
+  "websocketEvent", "websocketEmit", "email", "redisKey",
 ];
 
 export const FRONTEND_NODE_TYPES: FrontendNodeType[] = [
@@ -45,12 +45,14 @@ export interface BaseNode {
 
 export interface DomainProps {
   name: string;
+  domain?: string;
   ipPort?: string;
   description?: string;
 }
 
 export interface SubdomainProps {
   name: string;
+  subdomain?: string;
   domainId: string;
   description?: string;
 }
@@ -60,16 +62,12 @@ export interface RouteProps {
   description?: string;
 }
 
-export interface EndpointIO {
-  body?: unknown;
-  params?: unknown;
-  query?: unknown;
-  statusCode?: number;
-}
-
 export interface ReturnSpec {
   status: number | string;
   description?: string;
+  // A specific output (e.g. a particular error code) can hand off to another node —
+  // another middleware, a service, or an error handler — instead of just ending the request.
+  chainToId?: string;
 }
 
 export interface CacheConfig {
@@ -80,14 +78,30 @@ export interface CacheConfig {
   invalidatedBy?: string[];
 }
 
+export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+
 export interface EndpointProps {
   name: string;
-  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+  methods: HttpMethod[];
   description?: string;
-  input?: EndpointIO;
-  output?: EndpointIO;
-  returns?: ReturnSpec[];
+  // Shared across every method/operation below (e.g. an auth header) — per-method query/path/body/
+  // returns live on the operation child instead, so they can differ between GET/POST/etc.
+  headers?: ModelField[];
   cacheable?: CacheConfig;
+  isPublic?: boolean;
+  // Only meaningful when isPublic is false — which security mechanism(s) gate this endpoint.
+  authMethods?: string[];
+}
+
+// One method's own contract + chain: query/params/body/returns, since those are what actually
+// differ between GET/POST/etc. Headers stay on the endpoint (shared across every method).
+export interface OperationProps {
+  method: HttpMethod;
+  description?: string;
+  query?: ModelField[];
+  params?: ModelField[];
+  body?: ModelField[];
+  returns?: ReturnSpec[];
 }
 
 export interface MiddlewareProps {
@@ -115,6 +129,8 @@ export interface ModelField {
 export interface ModelProps {
   name: string;
   schema: ModelField[];
+  // Which table this shape maps to — a table can have several models (one per endpoint's needs).
+  tableId?: string;
 }
 
 export interface TableColumn {
@@ -132,6 +148,7 @@ export interface TableProps {
   name: string;
   columns: TableColumn[];
   relations?: TableRelation[];
+  dbId?: string;
 }
 
 export interface DbProps {
@@ -192,9 +209,21 @@ export interface EnvConfigProps {
 
 export interface WebSocketProps {
   name: string;
+  namespace?: string;
+  description?: string;
+}
+
+export interface WebSocketEventProps {
   event: string;
-  input?: unknown;
-  output?: unknown;
+  description?: string;
+  payload?: ModelField[];
+}
+
+export interface WebSocketEmitProps {
+  event: string;
+  payload?: ModelField[];
+  target: "sender" | "broadcast" | "room";
+  roomParam?: string;
 }
 
 export interface EmailProps {
@@ -319,11 +348,22 @@ export interface ContainerProps {
   label: string;
 }
 
+export interface BoundaryProps {
+  label: string;
+  kind?: "microservice" | "network-zone" | "module" | "bounded-context" | string;
+}
+
+export interface NoteProps {
+  text: string;
+  color?: "yellow" | "blue" | "pink" | "green";
+}
+
 export interface NodePropsMap {
   domain: DomainProps;
   subdomain: SubdomainProps;
   route: RouteProps;
   endpoint: EndpointProps;
+  operation: OperationProps;
   middleware: MiddlewareProps;
   service: ServiceProps;
   model: ModelProps;
@@ -338,6 +378,8 @@ export interface NodePropsMap {
   errorHandler: ErrorHandlerProps;
   envConfig: EnvConfigProps;
   websocket: WebSocketProps;
+  websocketEvent: WebSocketEventProps;
+  websocketEmit: WebSocketEmitProps;
   email: EmailProps;
   redisKey: RedisKeyProps;
   page: PageProps;
@@ -353,6 +395,8 @@ export interface NodePropsMap {
   themeToken: ThemeTokenProps;
   asset: AssetProps;
   container: ContainerProps;
+  boundary: BoundaryProps;
+  note: NoteProps;
 }
 
 export type GraphNode<T extends NodeType = NodeType> = BaseNode & {

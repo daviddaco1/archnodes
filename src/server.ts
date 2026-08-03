@@ -84,6 +84,11 @@ export function createServer(store: ProjectStore): express.Express {
     res.status(201).json(edge);
   });
 
+  app.delete("/api/edges/:id", (req: Request, res: Response) => {
+    store.deleteEdge(req.params.id);
+    res.status(204).end();
+  });
+
   app.get("/api/validate", (_req: Request, res: Response) => {
     res.json(store.validateProject());
   });

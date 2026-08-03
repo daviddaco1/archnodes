@@ -227,6 +227,22 @@ label {
   box-shadow: var(--shadow-soft);
 }
 
+@keyframes field-flash {
+  0%, 40% {
+    background: rgba(192, 57, 43, 0.16);
+    box-shadow: 0 0 0 1px var(--color-danger);
+  }
+  100% {
+    background: transparent;
+    box-shadow: 0 0 0 1px transparent;
+  }
+}
+
+.field-flash {
+  border-radius: var(--radius-md);
+  animation: field-flash 1.6s ease-out;
+}
+
 .badge {
   display: inline-flex;
   align-items: center;

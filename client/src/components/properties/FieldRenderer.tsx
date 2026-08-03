@@ -45,6 +45,40 @@ export function FieldRenderer({ field, value, onChange }: FieldRendererProps) {
     case "refSelect":
     case "refSelectCrossTab":
       return <RefSelectField field={field} value={value as string | undefined} onChange={onChange} />;
+    case "multiSelect": {
+      const selected = (value as string[]) ?? [];
+      return (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          {field.options?.map((opt) => {
+            const checked = selected.includes(opt);
+            return (
+              <label
+                key={opt}
+                className="mono"
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 4,
+                  padding: "3px 8px",
+                  borderRadius: "var(--radius-pill)",
+                  border: `1px solid ${checked ? "var(--color-text)" : "var(--color-border)"}`,
+                  fontSize: 11,
+                  cursor: "pointer",
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  onChange={(e) => onChange(e.target.checked ? [...selected, opt] : selected.filter((v) => v !== opt))}
+                  style={{ width: "auto" }}
+                />
+                {opt}
+              </label>
+            );
+          })}
+        </div>
+      );
+    }
     case "arrayOfObjects":
       return (
         <ArrayField

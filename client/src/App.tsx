@@ -9,10 +9,11 @@ import { PropertyPanel } from "./components/properties/PropertyPanel";
 import { OverviewTab } from "./components/overview/OverviewTab";
 import { ValidationPanel } from "./components/validation/ValidationPanel";
 import { SetupWizardModal } from "./components/setup/SetupWizardModal";
-import type { ValidationResult } from "./api/client";
+import { nodeSchemas } from "./schema/nodeSchemas";
+import type { ValidationIssue, ValidationResult } from "./api/client";
 
 function AppShell() {
-  const { loading, error, nodes, manifest, refetch } = useGraph();
+  const { loading, error, nodes, edges, manifest, refetch, setSelectedNodeId, setFocusField } = useGraph();
   const [tab, setTab] = useState<TabKey>("backend");
   const [validation, setValidation] = useState<ValidationResult | null>(null);
   const [setupOpen, setSetupOpen] = useState(false);
@@ -25,6 +26,22 @@ function AppShell() {
       autoShown.current = true;
     }
   }, [loading, nodes.length, manifest?.language]);
+
+  const handleNavigateToIssue = (issue: ValidationIssue) => {
+    let nodeId = issue.nodeId;
+    if (!nodeId && issue.edgeId) {
+      const edge = edges.find((e) => e.id === issue.edgeId);
+      nodeId = edge?.target ?? edge?.source;
+    }
+    if (!nodeId) return;
+    const node = nodes.find((n) => n.id === nodeId);
+    if (!node) return;
+    const category = nodeSchemas[node.type].category;
+    if (category === "backend" || category === "frontend") setTab(category);
+    setSelectedNodeId(nodeId);
+    setFocusField(issue.field ?? null);
+    setValidation(null);
+  };
 
   if (loading)
     return (
@@ -51,7 +68,7 @@ function AppShell() {
             <PropertyPanel />
           </ReactFlowProvider>
         )}
-        <ValidationPanel result={validation} onClose={() => setValidation(null)} />
+        <ValidationPanel result={validation} onClose={() => setValidation(null)} onNavigate={handleNavigateToIssue} />
       </div>
       {setupOpen && (
         <SetupWizardModal

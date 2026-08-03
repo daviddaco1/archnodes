@@ -1,17 +1,24 @@
-import type {
-  AnyGraphNode,
-  ApiCallProps,
-  EndpointProps,
-  FormProps,
-  GraphEdge,
-  MiddlewareProps,
-  NavigationRouterProps,
-  PageProps,
-  ProjectGraph,
-  ReturnSpec,
-  RouteProps,
-  ServiceProps,
+import {
+  BACKEND_NODE_TYPES,
+  type AnyGraphNode,
+  type ApiCallProps,
+  type EndpointProps,
+  type FormProps,
+  type GraphEdge,
+  type MiddlewareProps,
+  type ModelField,
+  type NavigationRouterProps,
+  type OperationProps,
+  type PageProps,
+  type ProjectGraph,
+  type ReturnSpec,
+  type RouteProps,
+  type ServiceProps,
+  type WebSocketEmitProps,
+  type WebSocketEventProps,
 } from "../types/graph.js";
+
+const BACKEND_TYPE_SET = new Set<string>(BACKEND_NODE_TYPES);
 import { validateProjectGraph, type ValidationIssue, type ValidationResult } from "../validation/rules.js";
 
 // ---- YAML (manual emitter, no js-yaml — the input is always our own plain data) ----
@@ -66,11 +73,6 @@ function yamlLines(value: unknown, indent: number): string[] {
 
 export function toYamlBlock(value: unknown, indent = 0): string {
   return yamlLines(value, indent).join("\n") + "\n";
-}
-
-function yamlFence(value: unknown): string {
-  const body = toYamlBlock(value).trimEnd();
-  return "```yaml\n" + body + "\n```\n";
 }
 
 // ---- graph traversal helpers ----
@@ -161,16 +163,24 @@ function renderReturnsTable(rows: { status: string | number; source: string; des
   return `**Returns (aggregated)**\n\n${header}${body}\n\n`;
 }
 
-function renderEndpoint(node: AnyGraphNode, headerLevel: number, edges: GraphEdge[], nodesById: Map<string, AnyGraphNode>): string {
-  const props = node.props as EndpointProps;
-  const fullPath = computeFullPath(node, nodesById);
-  const hashes = "#".repeat(headerLevel);
-  const parts: string[] = [`${hashes} Endpoint: ${props.method} ${fullPath} (\`${node.id}\`)`, ""];
+function renderParamTable(title: string, fields: ModelField[] | undefined): string {
+  if (!fields || fields.length === 0) return "";
+  const header = "| Name | Type | Required |\n|---|---|---|\n";
+  const body = fields.map((f) => `| ${f.name} | ${f.type} | ${f.required ? "yes" : "no"} |`).join("\n");
+  return `**${title}**\n\n${header}${body}\n\n`;
+}
 
-  if (props.description) parts.push(props.description, "");
-  if (props.input) parts.push("**Input**", "", yamlFence(props.input));
+interface ReturnRow {
+  status: string | number;
+  source: string;
+  description: string;
+}
 
-  const { middlewares, service } = resolveChain(node.id, edges, nodesById);
+// Shared by the endpoint's own (implicit) chain and by each explicit operation child — walks
+// middleware/service starting at `startId` and renders the chain + aggregated returns table.
+function renderChain(startId: string, ownReturns: ReturnSpec[] | undefined, edges: GraphEdge[], nodesById: Map<string, AnyGraphNode>): string {
+  const parts: string[] = [];
+  const { middlewares, service } = resolveChain(startId, edges, nodesById);
 
   if (middlewares.length > 0) {
     parts.push("**Middleware chain**", "");
@@ -187,19 +197,54 @@ function renderEndpoint(node: AnyGraphNode, headerLevel: number, edges: GraphEdg
     parts.push("**Service**", "", `- ${svcProps.name}${svcProps.description ? ` — ${svcProps.description}` : ""}`, "");
   }
 
-  if (props.output) parts.push("**Output**", "", yamlFence(props.output));
-
-  const returnRows: { status: string | number; source: string; description: string }[] = [];
-  for (const r of props.returns ?? []) returnRows.push({ status: r.status, source: "endpoint", description: r.description ?? "" });
+  const returnRows: ReturnRow[] = [];
+  for (const r of ownReturns ?? [])
+    returnRows.push({ status: r.status, source: "endpoint", description: `${r.description ?? ""}${r.chainToId ? ` → chains to \`${r.chainToId}\`` : ""}`.trim() });
   for (const mw of middlewares) {
     const mwProps = mw.props as MiddlewareProps;
-    for (const r of mwProps.returns ?? []) returnRows.push({ status: r.status, source: `middleware:${mwProps.name}`, description: r.description ?? "" });
+    for (const r of mwProps.returns ?? [])
+      returnRows.push({
+        status: r.status,
+        source: `middleware:${mwProps.name}`,
+        description: `${r.description ?? ""}${r.chainToId ? ` → chains to \`${r.chainToId}\`` : ""}`.trim(),
+      });
   }
   if (service) {
     const svcProps = service.props as ServiceProps;
     for (const r of svcProps.errors ?? []) returnRows.push({ status: r.status, source: `service:${svcProps.name}`, description: r.description ?? "" });
   }
   parts.push(renderReturnsTable(returnRows));
+
+  return parts.join("\n");
+}
+
+function renderOperation(node: AnyGraphNode, edges: GraphEdge[], nodesById: Map<string, AnyGraphNode>): string {
+  const props = node.props as OperationProps;
+  const parts: string[] = [`**Operation: ${props.method}** (\`${node.id}\`)`, ""];
+  if (props.description) parts.push(props.description, "");
+  parts.push(renderParamTable("Query", props.query));
+  parts.push(renderParamTable("Path params", props.params));
+  parts.push(renderParamTable("Body", props.body));
+  parts.push(renderChain(node.id, props.returns, edges, nodesById));
+  return parts.join("\n") + "\n";
+}
+
+function renderEndpoint(node: AnyGraphNode, headerLevel: number, edges: GraphEdge[], nodesById: Map<string, AnyGraphNode>): string {
+  const props = node.props as EndpointProps;
+  const fullPath = computeFullPath(node, nodesById);
+  const hashes = "#".repeat(headerLevel);
+  const methods = (props.methods ?? []).join("/") || "?";
+  const parts: string[] = [`${hashes} Endpoint: ${methods} ${fullPath} (\`${node.id}\`)`, ""];
+
+  if (props.description) parts.push(props.description, "");
+  parts.push(
+    props.isPublic === true
+      ? "**Acceso**: Pública"
+      : `**Acceso**: Privada — ${props.authMethods && props.authMethods.length > 0 ? props.authMethods.join(", ") : "(sin método de seguridad definido)"}`,
+    "",
+  );
+  parts.push(renderParamTable("Headers", props.headers));
+  parts.push(renderChain(node.id, undefined, edges, nodesById));
 
   if (props.cacheable?.enabled) {
     parts.push(
@@ -212,6 +257,9 @@ function renderEndpoint(node: AnyGraphNode, headerLevel: number, edges: GraphEdg
       "",
     );
   }
+
+  const operations = hierarchyChildren(node.id, edges, nodesById).filter((c) => c.type === "operation");
+  for (const op of operations) parts.push(renderOperation(op, edges, nodesById));
 
   return parts.join("\n") + "\n";
 }
@@ -230,14 +278,18 @@ function renderRoute(node: AnyGraphNode, headerLevel: number, edges: GraphEdge[]
 }
 
 function renderDomain(node: AnyGraphNode, edges: GraphEdge[], nodesById: Map<string, AnyGraphNode>): string {
-  const props = node.props as { name: string; ipPort?: string; description?: string };
+  const props = node.props as { name: string; domain?: string; ipPort?: string; description?: string };
   const parts: string[] = [`### Domain: ${props.name} (\`${node.id}\`)`, ""];
-  if (props.description) parts.push(props.description, "");
+  if (props.domain) parts.push(`- Domain: \`${props.domain}\``);
+  if (props.ipPort) parts.push(`- IP:Port: \`${props.ipPort}\``);
+  if (props.description) parts.push("", props.description);
+  parts.push("");
 
   for (const child of hierarchyChildren(node.id, edges, nodesById)) {
     if (child.type === "subdomain") {
-      const subProps = child.props as { name: string };
-      parts.push(`#### Subdomain: ${subProps.name} (\`${child.id}\`)`, "");
+      const subProps = child.props as { name: string; subdomain?: string };
+      const fullHost = subProps.subdomain && props.domain ? ` — \`${subProps.subdomain}.${props.domain}\`` : "";
+      parts.push(`#### Subdomain: ${subProps.name}${fullHost} (\`${child.id}\`)`, "");
       for (const grandchild of hierarchyChildren(child.id, edges, nodesById)) {
         if (grandchild.type === "route") parts.push(renderRoute(grandchild, 5, edges, nodesById));
       }
@@ -254,11 +306,35 @@ function renderList(title: string, items: string[]): string {
   return `### ${title}\n\n${items.map((i) => `- ${i}`).join("\n")}\n\n`;
 }
 
-function renderInfraSections(nodes: AnyGraphNode[]): string {
+function renderWebsockets(nodes: AnyGraphNode[], edges: GraphEdge[], nodesById: Map<string, AnyGraphNode>): string {
+  const sockets = nodes.filter((n) => n.type === "websocket");
+  if (sockets.length === 0) return "";
+  const parts: string[] = ["### WebSockets", ""];
+  for (const socket of sockets) {
+    const socketProps = socket.props as { name: string; namespace?: string };
+    parts.push(`- ${socketProps.name}${socketProps.namespace ? ` (\`${socketProps.namespace}\`)` : ""} (\`${socket.id}\`)`);
+    for (const event of hierarchyChildren(socket.id, edges, nodesById)) {
+      if (event.type !== "websocketEvent") continue;
+      const eventProps = event.props as WebSocketEventProps;
+      parts.push(`  - on \`${eventProps.event}\` (\`${event.id}\`)`);
+      for (const emit of hierarchyChildren(event.id, edges, nodesById)) {
+        if (emit.type !== "websocketEmit") continue;
+        const emitProps = emit.props as WebSocketEmitProps;
+        const target =
+          emitProps.target === "room" ? `room via \`${emitProps.roomParam ?? "?"}\`` : emitProps.target === "broadcast" ? "all clients" : "sender";
+        parts.push(`    - emits \`${emitProps.event}\` → ${target} (\`${emit.id}\`)`);
+      }
+    }
+  }
+  parts.push("");
+  return parts.join("\n");
+}
+
+function renderInfraSections(nodes: AnyGraphNode[], edges: GraphEdge[], nodesById: Map<string, AnyGraphNode>): string {
   const models = nodes.filter((n) => n.type === "model").map((n) => `${(n.props as { name: string }).name} (\`${n.id}\`)`);
   const tables = nodes.filter((n) => n.type === "table").map((n) => `${(n.props as { name: string }).name} (\`${n.id}\`)`);
   const tools = nodes
-    .filter((n) => n.type === "tool" || n.type === "queue" || n.type === "scheduler" || n.type === "websocket" || n.type === "errorHandler" || n.type === "envConfig")
+    .filter((n) => n.type === "tool" || n.type === "queue" || n.type === "scheduler" || n.type === "errorHandler" || n.type === "envConfig")
     .map((n) => `${n.type}: ${(n.props as { name?: string }).name ?? n.label} (\`${n.id}\`)`);
   const externalApis = nodes.filter((n) => n.type === "externalApi").map((n) => `${(n.props as { name: string; baseUrl: string }).name} — ${(n.props as { baseUrl: string }).baseUrl} (\`${n.id}\`)`);
   const emails = nodes.filter((n) => n.type === "email").map((n) => `${(n.props as { trigger: string }).trigger} (\`${n.id}\`)`);
@@ -267,6 +343,7 @@ function renderInfraSections(nodes: AnyGraphNode[]): string {
     renderList("Models", models),
     renderList("Tables", tables),
     renderList("Tools & Infra", tools),
+    renderWebsockets(nodes, edges, nodesById),
     renderList("External APIs", externalApis),
     renderList("Emails", emails),
   ].join("");
@@ -350,6 +427,8 @@ const CODE_LABELS: Record<ValidationIssue["code"], string> = {
   INVALID_HIERARCHY: "INVALID HIERARCHY",
   INVALID_REF_TYPE: "INVALID REF TYPE",
   INVALID_EDGE: "INVALID EDGE",
+  INVALID_OPERATION_METHOD: "INVALID OPERATION METHOD",
+  DUPLICATE_OPERATION_METHOD: "DUPLICATE OPERATION METHOD",
 };
 
 function renderValidationWarnings(validation: ValidationResult): string {
@@ -367,10 +446,11 @@ export function exportMarkdown(graph: ProjectGraph, validation?: ValidationResul
   const parts: string[] = [renderManifest(graph)];
 
   const domains = graph.nodes.filter((n) => n.type === "domain" && (!domainId || n.id === domainId));
-  if (domains.length > 0) {
+  const hasBackend = domains.length > 0 || graph.nodes.some((n) => BACKEND_TYPE_SET.has(n.type));
+  if (hasBackend) {
     parts.push("## Backend", "");
     for (const domain of domains) parts.push(renderDomain(domain, graph.edges, nodesById));
-    parts.push(renderInfraSections(graph.nodes));
+    parts.push(renderInfraSections(graph.nodes, graph.edges, nodesById));
   }
 
   const hasFrontend = graph.nodes.some((n) => n.type === "page" || n.type === "navigationRouter" || n.type === "stateStore");

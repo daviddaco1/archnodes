@@ -1,17 +1,28 @@
 import { NodeResizer, type NodeProps } from "@xyflow/react";
 
 export interface ContainerNodeData {
-  props: { label: string };
+  nodeType?: "container" | "boundary";
+  props: { label: string; kind?: string };
   [key: string]: unknown;
 }
 
+const BOUNDARY_COLORS: Record<string, string> = {
+  microservice: "#4c6ef5",
+  "network-zone": "#dd6b20",
+  module: "#805ad5",
+  "bounded-context": "#2c7a7b",
+};
+
 export function ContainerNode({ data, selected }: NodeProps & { data: ContainerNodeData }) {
+  const isBoundary = data.nodeType === "boundary";
+  const borderColor = isBoundary ? BOUNDARY_COLORS[data.props.kind ?? "microservice"] ?? "var(--color-border)" : "var(--color-border)";
+
   return (
     <div
       style={{
         width: "100%",
         height: "100%",
-        border: "2px dashed var(--color-border)",
+        border: `2px dashed ${borderColor}`,
         borderRadius: "var(--radius-lg)",
         background: "var(--color-canvas-soft)",
       }}
@@ -25,10 +36,11 @@ export function ContainerNode({ data, selected }: NodeProps & { data: ContainerN
           fontWeight: 500,
           textTransform: "uppercase",
           letterSpacing: "0.06em",
-          color: "var(--color-text-faint)",
+          color: isBoundary ? borderColor : "var(--color-text-faint)",
         }}
       >
-        {data.props.label || "Contenedor"}
+        {data.props.label || (isBoundary ? "Boundary" : "Contenedor")}
+        {isBoundary && data.props.kind && <span style={{ opacity: 0.7 }}> · {data.props.kind}</span>}
       </div>
     </div>
   );

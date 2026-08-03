@@ -8,7 +8,8 @@ export type FieldKind =
   | "select"
   | "refSelect" // ref to another node of the SAME tab (e.g. service.props.ormId -> Orm)
   | "refSelectCrossTab" // ref to a node in the OTHER tab (e.g. apiCall.props.endpointRef -> Endpoint)
-  | "arrayOfObjects"; // e.g. Table.props.columns[]
+  | "arrayOfObjects" // e.g. Table.props.columns[]
+  | "multiSelect"; // e.g. Endpoint.props.methods[] — checkbox group, value is string[]
 
 export interface FieldDef {
   key: string;

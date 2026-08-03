@@ -10,36 +10,143 @@ import {
   type Node as RFNode,
   type Edge as RFEdge,
   type NodeMouseHandler,
+  type EdgeMouseHandler,
   type OnNodeDrag,
+  type OnConnectStart,
+  type OnConnectEnd,
 } from "@xyflow/react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useGraph } from "../../context/GraphContext";
 import { nodeSchemas } from "../../schema/nodeSchemas";
+import { defaultCompanionProps } from "../../schema/companionDefaults";
 import type { AnyGraphNode, GraphEdge, NodeType } from "../../types/graph";
 import * as api from "../../api/client";
-import { edgeKind } from "./edgeValidation";
+import type { SchemaResponse } from "../../api/client";
+import { compatibleSources, compatibleTargets, edgeKind, type ConnectionRules } from "./edgeValidation";
+import {
+  parseRefEdgeId,
+  refEdgeSourceTypesTo,
+  refEdgeSpec,
+  refEdgeTargetTypesFrom,
+  synthesizeRefEdges,
+  type RefEdgeRules,
+} from "./refEdges";
 import { GenericNode, type GenericNodeData } from "./GenericNode";
 import { ContainerNode, type ContainerNodeData } from "./ContainerNode";
+import { NoteNode, type NoteNodeData } from "./NoteNode";
 import styles from "./GraphCanvas.module.css";
 
-const nodeTypes = { generic: GenericNode, container: ContainerNode };
+const nodeTypes = { generic: GenericNode, container: ContainerNode, boundary: ContainerNode, note: NoteNode };
+const STRUCTURAL_PARENT_TYPES = new Set(["container", "boundary"]);
 
 interface GraphCanvasProps {
   category: "backend" | "frontend";
 }
 
-function toRFNodes(nodes: AnyGraphNode[]): RFNode<GenericNodeData | ContainerNodeData>[] {
-  const containers = nodes.filter((n) => n.type === "container");
-  const rest = nodes.filter((n) => n.type !== "container");
-  return [...containers, ...rest].map((n) => ({
-    id: n.id,
-    type: n.type === "container" ? "container" : "generic",
-    position: n.position,
-    parentId: n.containerId,
-    extent: n.containerId ? ("parent" as const) : undefined,
-    style: n.type === "container" ? { width: 320, height: 220, zIndex: -1 } : undefined,
-    data: { nodeType: n.type, props: n.props as Record<string, unknown> },
-  }));
+interface ConnectingState {
+  nodeId: string;
+  nodeType: NodeType;
+  handleType: "source" | "target";
+}
+
+interface EdgeMenuState {
+  edgeId: string;
+  sourceId: string;
+  targetId: string;
+  x: number;
+  y: number;
+}
+
+interface NodeMenuState {
+  nodeId: string;
+  x: number;
+  y: number;
+}
+
+function isConnectable(
+  connectionRules: ConnectionRules,
+  refEdgeRules: RefEdgeRules,
+  sourceType: NodeType,
+  targetType: NodeType,
+): boolean {
+  return edgeKind(connectionRules, sourceType, targetType) !== undefined || Boolean(refEdgeSpec(refEdgeRules, sourceType, targetType));
+}
+
+function toRFNodes(
+  nodes: AnyGraphNode[],
+  connectionRules: ConnectionRules,
+  refEdgeRules: RefEdgeRules,
+  onQuickAdd: (sourceId: string, targetType: NodeType) => void,
+  onQuickAddIncoming: (targetId: string, sourceType: NodeType) => void,
+  connecting: ConnectingState | null,
+): RFNode<GenericNodeData | ContainerNodeData | NoteNodeData>[] {
+  const nodesById = new Map(nodes.map((node) => [node.id, node]));
+  const parents = nodes.filter((n) => STRUCTURAL_PARENT_TYPES.has(n.type));
+  const rest = nodes.filter((n) => !STRUCTURAL_PARENT_TYPES.has(n.type));
+  return [...parents, ...rest].map((n) => {
+    if (STRUCTURAL_PARENT_TYPES.has(n.type)) {
+      return {
+        id: n.id,
+        type: n.type as "container" | "boundary",
+        position: n.position,
+        parentId: n.containerId,
+        extent: n.containerId ? ("parent" as const) : undefined,
+        style: { width: 320, height: 220, zIndex: -1 },
+        data: { nodeType: n.type as "container" | "boundary", props: n.props as { label: string; kind?: string } },
+      };
+    }
+    if (n.type === "note") {
+      return {
+        id: n.id,
+        type: "note" as const,
+        position: n.position,
+        parentId: n.containerId,
+        extent: n.containerId ? ("parent" as const) : undefined,
+        data: { props: n.props as { text?: string; color?: "yellow" | "blue" | "pink" | "green" } },
+      };
+    }
+    let highlight: "valid" | "invalid" | undefined;
+    if (connecting && n.id !== connecting.nodeId) {
+      const isValid =
+        connecting.handleType === "source"
+          ? isConnectable(connectionRules, refEdgeRules, connecting.nodeType, n.type)
+          : isConnectable(connectionRules, refEdgeRules, n.type, connecting.nodeType);
+      highlight = isValid ? "valid" : "invalid";
+    }
+    const outgoingTypes = [...new Set([...compatibleTargets(connectionRules, n.type), ...refEdgeTargetTypesFrom(refEdgeRules, n.type)])];
+    const incomingTypes = [...new Set([...compatibleSources(connectionRules, n.type), ...refEdgeSourceTypesTo(refEdgeRules, n.type)])];
+
+    let resolvedTitle: string | undefined;
+    if (n.type === "subdomain") {
+      const props = n.props as { subdomain?: string; domainId?: string };
+      const domainNode = props.domainId ? nodesById.get(props.domainId) : undefined;
+      const domainValue = domainNode ? (domainNode.props as { domain?: string }).domain : undefined;
+      if (props.subdomain && domainValue) resolvedTitle = `${props.subdomain}.${domainValue}`;
+    }
+    if (n.type === "operation") {
+      const method = (n.props as { method?: string }).method;
+      if (method) resolvedTitle = method;
+    }
+
+    return {
+      id: n.id,
+      type: "generic" as const,
+      position: n.position,
+      parentId: n.containerId,
+      extent: n.containerId ? ("parent" as const) : undefined,
+      data: {
+        nodeType: n.type,
+        props: n.props as Record<string, unknown>,
+        resolvedTitle,
+        highlight,
+        compatibleTypes: outgoingTypes,
+        incomingCompatibleTypes: incomingTypes,
+        canReceiveConnection: incomingTypes.length > 0,
+        onQuickAdd: (targetType: NodeType) => onQuickAdd(n.id, targetType),
+        onQuickAddIncoming: (sourceType: NodeType) => onQuickAddIncoming(n.id, sourceType),
+      },
+    };
+  });
 }
 
 function toRFEdges(edges: GraphEdge[]): RFEdge[] {
@@ -51,15 +158,35 @@ function toRFEdges(edges: GraphEdge[]): RFEdge[] {
   }));
 }
 
+// A ref field pointing at the same node a hierarchy/invalidates edge already connects (e.g.
+// subdomain.domainId mirroring the domain -> subdomain hierarchy edge, just reversed) would draw
+// a redundant second line — skip those, the real edge already shows the relationship.
+function toSyntheticRefRFEdges(nodes: AnyGraphNode[], refFields: SchemaResponse["refFields"] | undefined, existingEdges: GraphEdge[]): RFEdge[] {
+  const connectedPairs = new Set(existingEdges.map((e) => [e.source, e.target].sort().join("::")));
+  return synthesizeRefEdges(nodes, refFields)
+    .filter((e) => !connectedPairs.has([e.source, e.target].sort().join("::")))
+    .map((e) => ({
+      id: e.id,
+      source: e.source,
+      target: e.target,
+      style: { stroke: "var(--color-preview)", strokeDasharray: "2 3" },
+      data: { isRef: true, field: e.field },
+    }));
+}
+
 export function GraphCanvas({ category }: GraphCanvasProps) {
-  const { nodes: graphNodes, edges: graphEdges, connectionRules, refetch, setSelectedNodeId } = useGraph();
+  const { nodes: graphNodes, edges: graphEdges, connectionRules, refEdgeRules, schema, refetch, setSelectedNodeId } = useGraph();
   const { screenToFlowPosition } = useReactFlow();
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
+  const [connecting, setConnecting] = useState<ConnectingState | null>(null);
+  const [edgeMenu, setEdgeMenu] = useState<EdgeMenuState | null>(null);
+  const [nodeMenu, setNodeMenu] = useState<NodeMenuState | null>(null);
 
   const categoryNodes = useMemo(
-    () => graphNodes.filter((n) => n.type === "container" || nodeSchemas[n.type].category === category),
+    () => graphNodes.filter((n) => nodeSchemas[n.type].category === "structure" || nodeSchemas[n.type].category === category),
     [graphNodes, category],
   );
+  const availableContainers = useMemo(() => categoryNodes.filter((n) => STRUCTURAL_PARENT_TYPES.has(n.type)), [categoryNodes]);
   const categoryNodeIds = useMemo(() => new Set(categoryNodes.map((n) => n.id)), [categoryNodes]);
   const categoryEdges = useMemo(
     () => graphEdges.filter((e) => categoryNodeIds.has(e.source) && categoryNodeIds.has(e.target)),
@@ -67,23 +194,145 @@ export function GraphCanvas({ category }: GraphCanvasProps) {
   );
   const nodesById = useMemo(() => new Map(graphNodes.map((n) => [n.id, n])), [graphNodes]);
 
-  const [rfNodes, setRfNodes, onNodesChange] = useNodesState(toRFNodes(categoryNodes));
-  const [rfEdges, setRfEdges, onEdgesChange] = useEdgesState(toRFEdges(categoryEdges));
+  const handleQuickAdd = useCallback(
+    async (sourceId: string, targetType: NodeType) => {
+      const source = nodesById.get(sourceId);
+      if (!source) return;
+      try {
+        const created = await api.createNode(targetType, defaultCompanionProps(targetType, graphNodes));
+        await api.updateNodePosition(created.id, { x: source.position.x + 40, y: source.position.y + 160 });
+        const kind = edgeKind(connectionRules, source.type, targetType);
+        if (kind) {
+          await api.createEdge(sourceId, created.id, kind);
+        } else {
+          const ref = refEdgeSpec(refEdgeRules, source.type, targetType);
+          if (ref) await api.updateNode(sourceId, { [ref.field]: created.id });
+        }
+        await refetch();
+        setSelectedNodeId(created.id);
+      } catch (err) {
+        console.error(err);
+      }
+    },
+    [nodesById, graphNodes, connectionRules, refEdgeRules, refetch, setSelectedNodeId],
+  );
+
+  const handleQuickAddIncoming = useCallback(
+    async (targetId: string, sourceType: NodeType) => {
+      const target = nodesById.get(targetId);
+      if (!target) return;
+      try {
+        const created = await api.createNode(sourceType, defaultCompanionProps(sourceType, graphNodes));
+        await api.updateNodePosition(created.id, { x: target.position.x + 40, y: target.position.y - 160 });
+        const kind = edgeKind(connectionRules, sourceType, target.type);
+        if (kind) {
+          await api.createEdge(created.id, targetId, kind);
+        } else {
+          const ref = refEdgeSpec(refEdgeRules, sourceType, target.type);
+          if (ref) await api.updateNode(created.id, { [ref.field]: targetId });
+        }
+        await refetch();
+        setSelectedNodeId(created.id);
+      } catch (err) {
+        console.error(err);
+      }
+    },
+    [nodesById, graphNodes, connectionRules, refEdgeRules, refetch, setSelectedNodeId],
+  );
+
+  const edgeMenuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!edgeMenu) return;
+    const closeOnOutsideClick = (event: MouseEvent) => {
+      if (edgeMenuRef.current?.contains(event.target as Node)) return;
+      setEdgeMenu(null);
+    };
+    document.addEventListener("mousedown", closeOnOutsideClick, { capture: true });
+    return () => document.removeEventListener("mousedown", closeOnOutsideClick, { capture: true });
+  }, [edgeMenu]);
+
+  const nodeMenuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!nodeMenu) return;
+    const closeOnOutsideClick = (event: MouseEvent) => {
+      if (nodeMenuRef.current?.contains(event.target as Node)) return;
+      setNodeMenu(null);
+    };
+    document.addEventListener("mousedown", closeOnOutsideClick, { capture: true });
+    return () => document.removeEventListener("mousedown", closeOnOutsideClick, { capture: true });
+  }, [nodeMenu]);
+
+  const handleNodeContextMenu: NodeMouseHandler = useCallback((event, node) => {
+    event.preventDefault();
+    setNodeMenu({ nodeId: node.id, x: event.clientX, y: event.clientY });
+  }, []);
+
+  const handleDuplicateNode = useCallback(async () => {
+    if (!nodeMenu) return;
+    const original = nodesById.get(nodeMenu.nodeId);
+    setNodeMenu(null);
+    if (!original) return;
+    try {
+      const created = await api.createNode(original.type, { ...(original.props as Record<string, unknown>) });
+      await api.updateNodePosition(created.id, { x: original.position.x + 40, y: original.position.y + 40 });
+      const parentEdge = graphEdges.find((e) => e.edgeType === "hierarchy" && e.target === original.id);
+      if (parentEdge) {
+        const kind = edgeKind(connectionRules, nodesById.get(parentEdge.source)?.type ?? original.type, original.type);
+        if (kind) await api.createEdge(parentEdge.source, created.id, kind);
+      }
+      if (original.containerId) await api.setNodeContainer(created.id, original.containerId);
+      await refetch();
+      setSelectedNodeId(created.id);
+    } catch (err) {
+      console.error(err);
+    }
+  }, [nodeMenu, nodesById, graphEdges, connectionRules, refetch, setSelectedNodeId]);
+
+  const handleCopyNodeId = useCallback(() => {
+    if (!nodeMenu) return;
+    const id = nodeMenu.nodeId;
+    setNodeMenu(null);
+    void navigator.clipboard?.writeText(id).catch(() => {});
+  }, [nodeMenu]);
+
+  const handleMoveToContainer = useCallback(
+    async (containerId: string | undefined) => {
+      if (!nodeMenu) return;
+      const nodeId = nodeMenu.nodeId;
+      setNodeMenu(null);
+      try {
+        await api.setNodeContainer(nodeId, containerId);
+        await refetch();
+      } catch (err) {
+        console.error(err);
+      }
+    },
+    [nodeMenu, refetch],
+  );
+
+  const handleDeleteFromNodeMenu = useCallback(() => {
+    if (!nodeMenu) return;
+    setPendingDeleteId(nodeMenu.nodeId);
+    setNodeMenu(null);
+  }, [nodeMenu]);
+
+  const [rfNodes, setRfNodes, onNodesChange] = useNodesState<RFNode<GenericNodeData | ContainerNodeData | NoteNodeData>>([]);
+  const [rfEdges, setRfEdges, onEdgesChange] = useEdgesState<RFEdge>([]);
 
   useEffect(() => {
-    setRfNodes(toRFNodes(categoryNodes));
-    setRfEdges(toRFEdges(categoryEdges));
+    setRfNodes(toRFNodes(categoryNodes, connectionRules, refEdgeRules, handleQuickAdd, handleQuickAddIncoming, connecting));
+    setRfEdges([...toRFEdges(categoryEdges), ...toSyntheticRefRFEdges(categoryNodes, schema?.refFields, categoryEdges)]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [categoryNodes, categoryEdges]);
+  }, [categoryNodes, categoryEdges, connectionRules, refEdgeRules, schema, handleQuickAdd, handleQuickAddIncoming, connecting]);
 
   const isValidConnection = useCallback(
     (connection: Connection | RFEdge) => {
       const source = nodesById.get(connection.source ?? "");
       const target = nodesById.get(connection.target ?? "");
       if (!source || !target) return false;
-      return edgeKind(connectionRules, source.type, target.type) !== undefined;
+      return isConnectable(connectionRules, refEdgeRules, source.type, target.type);
     },
-    [connectionRules, nodesById],
+    [connectionRules, refEdgeRules, nodesById],
   );
 
   const handleConnect = useCallback(
@@ -92,26 +341,47 @@ export function GraphCanvas({ category }: GraphCanvasProps) {
       const source = nodesById.get(connection.source);
       const target = nodesById.get(connection.target);
       if (!source || !target) return;
-      const kind = edgeKind(connectionRules, source.type, target.type);
-      if (!kind) return;
       try {
-        await api.createEdge(connection.source, connection.target, kind);
+        const kind = edgeKind(connectionRules, source.type, target.type);
+        if (kind) {
+          await api.createEdge(connection.source, connection.target, kind);
+        } else {
+          const ref = refEdgeSpec(refEdgeRules, source.type, target.type);
+          if (!ref) return;
+          await api.updateNode(connection.source, { [ref.field]: connection.target });
+        }
         await refetch();
       } catch (err) {
         console.error(err);
       }
     },
-    [connectionRules, nodesById, refetch],
+    [connectionRules, refEdgeRules, nodesById, refetch],
   );
+
+  const handleConnectStart: OnConnectStart = useCallback(
+    (_event, params) => {
+      if (!params.nodeId) return;
+      const node = nodesById.get(params.nodeId);
+      if (!node) return;
+      setConnecting({ nodeId: params.nodeId, nodeType: node.type, handleType: params.handleType === "target" ? "target" : "source" });
+    },
+    [nodesById],
+  );
+
+  const handleConnectEnd: OnConnectEnd = useCallback(() => {
+    setConnecting(null);
+  }, []);
 
   const handleNodeClick: NodeMouseHandler = useCallback(
     (_event, node) => {
       setSelectedNodeId(node.id);
+      setEdgeMenu(null);
+      setNodeMenu(null);
     },
     [setSelectedNodeId],
   );
 
-  const handleNodeDragStop: OnNodeDrag<RFNode<GenericNodeData | ContainerNodeData>> = useCallback(
+  const handleNodeDragStop: OnNodeDrag<RFNode<GenericNodeData | ContainerNodeData | NoteNodeData>> = useCallback(
     (_event, node) => {
       void api.updateNodePosition(node.id, node.position).catch((err) => console.error(err));
       const graphNode = nodesById.get(node.id);
@@ -160,6 +430,36 @@ export function GraphCanvas({ category }: GraphCanvasProps) {
     [pendingDeleteId, refetch, setSelectedNodeId],
   );
 
+  const handleEdgeContextMenu: EdgeMouseHandler = useCallback((event, edge) => {
+    event.preventDefault();
+    setEdgeMenu({ edgeId: edge.id, sourceId: edge.source, targetId: edge.target, x: event.clientX, y: event.clientY });
+  }, []);
+
+  const handleDeleteEdge = useCallback(async () => {
+    if (!edgeMenu) return;
+    try {
+      const ref = parseRefEdgeId(edgeMenu.edgeId);
+      if (ref) {
+        await api.updateNode(ref.nodeId, { [ref.field]: null });
+      } else {
+        await api.deleteEdge(edgeMenu.edgeId);
+      }
+      await refetch();
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setEdgeMenu(null);
+    }
+  }, [edgeMenu, refetch]);
+
+  const handleSelectFromMenu = useCallback(
+    (nodeId: string) => {
+      setSelectedNodeId(nodeId);
+      setEdgeMenu(null);
+    },
+    [setSelectedNodeId],
+  );
+
   return (
     <div className={styles.wrapper} onDrop={handleDrop} onDragOver={handleDragOver}>
       <ReactFlow
@@ -169,10 +469,22 @@ export function GraphCanvas({ category }: GraphCanvasProps) {
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onConnect={handleConnect}
+        onConnectStart={handleConnectStart}
+        onConnectEnd={handleConnectEnd}
         isValidConnection={isValidConnection}
         onNodeClick={handleNodeClick}
         onNodeDragStop={handleNodeDragStop}
-        onPaneClick={() => setSelectedNodeId(null)}
+        onNodeContextMenu={handleNodeContextMenu}
+        onEdgeContextMenu={handleEdgeContextMenu}
+        onPaneClick={() => {
+          setSelectedNodeId(null);
+          setEdgeMenu(null);
+          setNodeMenu(null);
+        }}
+        onMoveStart={() => {
+          setEdgeMenu(null);
+          setNodeMenu(null);
+        }}
         onNodesDelete={(deleted) => deleted[0] && setPendingDeleteId(deleted[0].id)}
         fitView
       >
@@ -180,6 +492,58 @@ export function GraphCanvas({ category }: GraphCanvasProps) {
         <Controls />
         <MiniMap pannable zoomable />
       </ReactFlow>
+      {edgeMenu && (
+        <div
+          ref={edgeMenuRef}
+          className="card"
+          style={{ position: "fixed", top: edgeMenu.y, left: edgeMenu.x, padding: 4, zIndex: 40, minWidth: 190 }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button type="button" className={styles.menuItem} onClick={() => handleSelectFromMenu(edgeMenu.sourceId)}>
+            Seleccionar nodo origen
+          </button>
+          <button type="button" className={styles.menuItem} onClick={() => handleSelectFromMenu(edgeMenu.targetId)}>
+            Seleccionar nodo destino
+          </button>
+          <button type="button" className={`${styles.menuItem} ${styles.menuItemDanger}`} onClick={() => void handleDeleteEdge()}>
+            Eliminar conexión
+          </button>
+        </div>
+      )}
+      {nodeMenu &&
+        (() => {
+          const menuNode = nodesById.get(nodeMenu.nodeId);
+          const otherContainers = availableContainers.filter((c) => c.id !== nodeMenu.nodeId);
+          return (
+            <div
+              ref={nodeMenuRef}
+              className="card"
+              style={{ position: "fixed", top: nodeMenu.y, left: nodeMenu.x, padding: 4, zIndex: 40, minWidth: 210 }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <button type="button" className={styles.menuItem} onClick={() => void handleDuplicateNode()}>
+                Duplicar nodo
+              </button>
+              <button type="button" className={styles.menuItem} onClick={handleCopyNodeId}>
+                Copiar ID
+              </button>
+              {otherContainers.length > 0 &&
+                otherContainers.map((c) => (
+                  <button key={c.id} type="button" className={styles.menuItem} onClick={() => void handleMoveToContainer(c.id)}>
+                    Agregar a: {(c.props as { label?: string }).label || c.type}
+                  </button>
+                ))}
+              {menuNode?.containerId && (
+                <button type="button" className={styles.menuItem} onClick={() => void handleMoveToContainer(undefined)}>
+                  Quitar de contenedor
+                </button>
+              )}
+              <button type="button" className={`${styles.menuItem} ${styles.menuItemDanger}`} onClick={handleDeleteFromNodeMenu}>
+                Eliminar nodo
+              </button>
+            </div>
+          );
+        })()}
       {pendingDeleteId && (
         <div className="card" style={{ position: "absolute", top: 16, right: 16, padding: 16, zIndex: 10, width: 260 }}>
           <div style={{ marginBottom: 10, fontSize: 13, fontWeight: 500 }}>¿Eliminar este nodo?</div>
@@ -200,7 +564,7 @@ export function GraphCanvas({ category }: GraphCanvasProps) {
               className="btn-secondary"
               onClick={() => {
                 setPendingDeleteId(null);
-                setRfNodes(toRFNodes(categoryNodes));
+                setRfNodes(toRFNodes(categoryNodes, connectionRules, refEdgeRules, handleQuickAdd, handleQuickAddIncoming, null));
               }}
             >
               Cancelar

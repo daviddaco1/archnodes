@@ -6,13 +6,16 @@ export const HIERARCHY_RULES: Partial<Record<NodeType, NodeType[]>> = {
   domain: ["subdomain", "route"],
   subdomain: ["route"],
   route: ["route", "endpoint"],
-  endpoint: ["middleware", "service"],
+  endpoint: ["operation", "middleware", "service"],
+  operation: ["middleware", "service"],
   middleware: ["middleware", "service"],
   service: ["service", "repository", "orm", "model", "table", "tool", "queue", "externalApi", "email", "redisKey"],
   page: ["layout", "component", "form", "modalDialog"],
   component: ["component", "apiCall", "hook", "form", "modalDialog"],
   form: ["apiCall"],
   navigationRouter: ["page"],
+  websocket: ["websocketEvent"],
+  websocketEvent: ["websocketEmit", "service"],
 };
 
 export function canConnect(parentType: NodeType, childType: NodeType): boolean {
@@ -28,10 +31,11 @@ export interface RefFieldSpec {
 // Fields inside `props` that reference another node by id (not a hierarchy edge).
 export const REF_FIELDS: Partial<Record<NodeType, RefFieldSpec[]>> = {
   subdomain: [{ field: "domainId", targetType: "domain" }],
-  orm: [{ field: "dbId", targetType: "db" }],
+  // Canonical direction is db -> orm (orm.dbId would just be the same relationship reversed).
   db: [{ field: "ormId", targetType: "orm" }],
   repository: [{ field: "ormId", targetType: "orm" }],
   service: [{ field: "ormId", targetType: "orm" }],
+  model: [{ field: "tableId", targetType: "table" }],
   queue: [
     { field: "toolId", targetType: "tool" },
     { field: "consumerServiceId", targetType: "service" },
@@ -58,20 +62,26 @@ export const REF_FIELDS: Partial<Record<NodeType, RefFieldSpec[]>> = {
   modalDialog: [{ field: "contentComponentId", targetType: "component" }],
   navigationRouter: [{ field: "routes[].pageId", targetType: "page", array: true }],
   endpoint: [{ field: "cacheable.invalidatedBy[]", targetType: ["redisKey", "endpoint"], array: true }],
-  table: [{ field: "relations[].targetTableId", targetType: "table", array: true }],
+  operation: [{ field: "returns[].chainToId", targetType: ["middleware", "service", "errorHandler"], array: true }],
+  middleware: [{ field: "returns[].chainToId", targetType: ["middleware", "service", "errorHandler"], array: true }],
+  table: [
+    { field: "relations[].targetTableId", targetType: "table", array: true },
+    { field: "dbId", targetType: "db" },
+  ],
 };
 
 export const REQUIRED_FIELDS: Record<NodeType, string[]> = {
   domain: ["name"],
   subdomain: ["name", "domainId"],
   route: [],
-  endpoint: ["name", "method"],
+  endpoint: ["name", "methods"],
+  operation: ["method"],
   middleware: ["name"],
   service: ["name"],
   model: ["name", "schema"],
   table: ["name", "columns"],
   db: ["engine", "connectionType"],
-  orm: ["name", "dbId"],
+  orm: ["name"],
   repository: ["name", "entityRef", "ormId"],
   tool: ["name"],
   queue: ["name", "topicOrJobName", "toolId"],
@@ -79,7 +89,9 @@ export const REQUIRED_FIELDS: Record<NodeType, string[]> = {
   scheduler: ["name", "cronExpression", "triggersServiceId"],
   errorHandler: ["name", "scope"],
   envConfig: ["domainId", "variables"],
-  websocket: ["name", "event"],
+  websocket: ["name"],
+  websocketEvent: ["event"],
+  websocketEmit: ["event", "target"],
   email: ["trigger"],
   redisKey: ["keyPattern", "operation", "toolId"],
   page: ["name", "path"],
@@ -95,6 +107,8 @@ export const REQUIRED_FIELDS: Record<NodeType, string[]> = {
   themeToken: [],
   asset: ["name", "kind", "path"],
   container: ["label"],
+  boundary: ["label"],
+  note: ["text"],
 };
 
 export const SPECIAL_EDGES: Record<"invalidates", { from: NodeType[]; to: NodeType[] }> = {
@@ -103,7 +117,14 @@ export const SPECIAL_EDGES: Record<"invalidates", { from: NodeType[]; to: NodeTy
 
 export interface ValidationIssue {
   level: "error" | "warning";
-  code: "BROKEN_REF" | "MISSING_FIELD" | "INVALID_HIERARCHY" | "INVALID_REF_TYPE" | "INVALID_EDGE";
+  code:
+    | "BROKEN_REF"
+    | "MISSING_FIELD"
+    | "INVALID_HIERARCHY"
+    | "INVALID_REF_TYPE"
+    | "INVALID_EDGE"
+    | "INVALID_OPERATION_METHOD"
+    | "DUPLICATE_OPERATION_METHOD";
   nodeId?: string;
   edgeId?: string;
   field?: string;
@@ -267,12 +288,59 @@ export function validateSpecialEdges(nodes: AnyGraphNode[], edges: GraphEdge[]):
   return issues;
 }
 
+// An operation's method must be one the parent endpoint actually declares, and no two
+// operations under the same endpoint may share a method (that's what "one node per method" avoids).
+export function validateOperationMethods(nodes: AnyGraphNode[]): ValidationIssue[] {
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const issues: ValidationIssue[] = [];
+  const byParent = new Map<string, AnyGraphNode[]>();
+  for (const node of nodes) {
+    if (node.type !== "operation" || !node.parentId) continue;
+    const list = byParent.get(node.parentId) ?? [];
+    list.push(node);
+    byParent.set(node.parentId, list);
+  }
+  for (const [parentId, operations] of byParent) {
+    const endpoint = byId.get(parentId);
+    const allowedMethods =
+      endpoint?.type === "endpoint"
+        ? ((endpoint.props as unknown as Record<string, unknown>).methods as string[] | undefined)
+        : undefined;
+    const seen = new Set<string>();
+    for (const op of operations) {
+      const method = (op.props as Record<string, unknown>).method as string | undefined;
+      if (!method) continue;
+      if (allowedMethods && !allowedMethods.includes(method)) {
+        issues.push({
+          level: "error",
+          code: "INVALID_OPERATION_METHOD",
+          nodeId: op.id,
+          field: "method",
+          message: `Operation ${op.id} uses method "${method}" which is not declared in endpoint.methods [${allowedMethods.join(", ")}]`,
+        });
+      }
+      if (seen.has(method)) {
+        issues.push({
+          level: "error",
+          code: "DUPLICATE_OPERATION_METHOD",
+          nodeId: op.id,
+          field: "method",
+          message: `Duplicate operation method "${method}" under the same endpoint (${parentId})`,
+        });
+      }
+      seen.add(method);
+    }
+  }
+  return issues;
+}
+
 export function validateProjectGraph(graph: ProjectGraph): ValidationResult {
   const issues = [
     ...graph.nodes.flatMap(validateRequiredFields),
     ...validateHierarchy(graph.nodes, graph.edges),
     ...validateRefs(graph.nodes),
     ...validateSpecialEdges(graph.nodes, graph.edges),
+    ...validateOperationMethods(graph.nodes),
   ];
   return { valid: issues.every((i) => i.level !== "error"), issues };
 }

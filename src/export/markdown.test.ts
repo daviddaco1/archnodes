@@ -19,24 +19,32 @@ afterEach(() => {
 });
 
 function buildLoginFixture() {
-  const domain = store.createNode("domain", { name: "Auth" });
-  const route = store.createNode("route", { path: "/login" }, domain.id);
+  const domain = store.createNode("domain", { name: "Auth", domain: "andresodev.com" });
+  const subdomain = store.createNode("subdomain", { name: "API", subdomain: "api", domainId: domain.id }, domain.id);
+  const route = store.createNode("route", { path: "/login" }, subdomain.id);
   const endpoint = store.createNode(
     "endpoint",
     {
       name: "login",
-      method: "POST",
-      input: { body: { email: "string", password: "string" } },
-      output: { statusCode: 200, body: { token: "string" } },
-      returns: [{ status: 200, description: "OK" }],
+      methods: ["POST"],
+      headers: [{ name: "Authorization", type: "string" }],
       cacheable: { enabled: true, keyPattern: "session:*", ttl: 3600, invalidation: "manual" },
     },
     route.id,
   );
+  const operation = store.createNode(
+    "operation",
+    {
+      method: "POST",
+      body: [{ name: "email", type: "string", required: true }],
+      returns: [{ status: 200, description: "OK" }],
+    },
+    endpoint.id,
+  );
   const middleware = store.createNode(
     "middleware",
     { name: "validateBody", returns: [{ status: 400, description: "Invalid body" }] },
-    endpoint.id,
+    operation.id,
   );
   const service = store.createNode(
     "service",
@@ -56,7 +64,7 @@ function buildLoginFixture() {
   );
   const apiCall = store.createNode("apiCall", { name: "loginCall", endpointRef: endpoint.id }, form.id);
 
-  return { domain, route, endpoint, middleware, service, page, form, apiCall };
+  return { domain, subdomain, route, endpoint, middleware, service, page, form, apiCall };
 }
 
 describe("exportMarkdown", () => {
@@ -67,7 +75,13 @@ describe("exportMarkdown", () => {
 
     expect(md).toContain("# Project Context:");
     expect(md).toContain("### Domain: Auth");
-    expect(md).toMatch(/##### Endpoint: POST \/login/);
+    expect(md).toContain("`andresodev.com`");
+    expect(md).toContain("`api.andresodev.com`");
+    expect(md).toMatch(/###### Endpoint: POST \/login/);
+    expect(md).toContain("**Body**");
+    expect(md).toContain("| email | string | yes |");
+    expect(md).toContain("**Headers**");
+    expect(md).toContain("| Authorization |");
     expect(md).toContain("**Returns (aggregated)**");
     expect(md).toContain("| 401 |");
     expect(md).toContain("**Cache**");
@@ -75,6 +89,83 @@ describe("exportMarkdown", () => {
     expect(md).toMatch(/loginCall → consumes `.*`/);
     expect(md).toContain("## Validation Warnings");
     expect(md).toContain("_(none)_");
+  });
+
+  it("shows a chainToId hint in the aggregated returns table", () => {
+    const domain = store.createNode("domain", { name: "Auth" });
+    const route = store.createNode("route", { path: "/x" }, domain.id);
+    const endpoint = store.createNode("endpoint", { name: "x", methods: ["GET"] }, route.id);
+    const errorHandler = store.createNode("errorHandler", { name: "GlobalHandler", scope: "global" });
+    const middleware = store.createNode(
+      "middleware",
+      { name: "auth", returns: [{ status: 401, description: "Unauthorized", chainToId: errorHandler.id }] },
+      endpoint.id,
+    );
+    void middleware;
+    const graph = store.getProject("all");
+    const md = exportMarkdown(graph, store.validateProject());
+    expect(md).toContain(`chains to \`${errorHandler.id}\``);
+  });
+
+  it("nests websocket events and emits", () => {
+    const socket = store.createNode("websocket", { name: "ChatSocket", namespace: "/chat" });
+    const event = store.createNode("websocketEvent", { event: "message" }, socket.id);
+    store.createNode("websocketEmit", { event: "message_received", target: "room", roomParam: "roomId" }, event.id);
+    const graph = store.getProject("all");
+    const md = exportMarkdown(graph, store.validateProject());
+    expect(md).toContain("### WebSockets");
+    expect(md).toContain("ChatSocket");
+    expect(md).toContain("on `message`");
+    expect(md).toContain("emits `message_received` → room via `roomId`");
+  });
+
+  it("treats an endpoint as private by default and public only when explicitly marked", () => {
+    const domain = store.createNode("domain", { name: "Auth" });
+    const route = store.createNode("route", { path: "/unset" }, domain.id);
+    const unsetEndpoint = store.createNode("endpoint", { name: "unset", methods: ["GET"] }, route.id);
+    const route2 = store.createNode("route", { path: "/secure" }, domain.id);
+    const secureEndpoint = store.createNode(
+      "endpoint",
+      { name: "secure", methods: ["GET"], isPublic: false, authMethods: ["JWT / Bearer Token", "API Key"] },
+      route2.id,
+    );
+    const route3 = store.createNode("route", { path: "/open" }, domain.id);
+    const openEndpoint = store.createNode("endpoint", { name: "open", methods: ["GET"], isPublic: true }, route3.id);
+
+    const graph = store.getProject("all");
+    const md = exportMarkdown(graph, store.validateProject());
+
+    expect(md).toMatch(/Endpoint: GET \/unset[\s\S]*?\*\*Acceso\*\*: Privada — \(sin método de seguridad definido\)/);
+    expect(md).toMatch(/Endpoint: GET \/secure[\s\S]*?\*\*Acceso\*\*: Privada — JWT \/ Bearer Token, API Key/);
+    expect(md).toMatch(/Endpoint: GET \/open[\s\S]*?\*\*Acceso\*\*: Pública/);
+    void unsetEndpoint;
+    void secureEndpoint;
+    void openEndpoint;
+  });
+
+  it("renders each operation child with its own params and chain", () => {
+    const domain = store.createNode("domain", { name: "Auth" });
+    const route = store.createNode("route", { path: "/users" }, domain.id);
+    const endpoint = store.createNode("endpoint", { name: "users", methods: ["GET", "POST"] }, route.id);
+    const getOp = store.createNode("operation", { method: "GET", query: [{ name: "page", type: "number" }] }, endpoint.id);
+    const postOp = store.createNode(
+      "operation",
+      { method: "POST", body: [{ name: "email", type: "string", required: true }] },
+      endpoint.id,
+    );
+    const service = store.createNode("service", { name: "CreateUser", errors: [{ status: 409, description: "Duplicate" }] }, postOp.id);
+    void service;
+    void getOp;
+
+    const graph = store.getProject("all");
+    const md = exportMarkdown(graph, store.validateProject());
+
+    expect(md).toContain("**Operation: GET**");
+    expect(md).toContain("| page | number |");
+    expect(md).toContain("**Operation: POST**");
+    expect(md).toContain("| email | string | yes |");
+    expect(md).toContain("- CreateUser");
+    expect(md).toContain("| 409 |");
   });
 
   it("reports a broken ref as a warning", () => {

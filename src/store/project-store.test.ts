@@ -27,7 +27,7 @@ describe("createNode", () => {
 
   it("rejects an invalid hierarchy on create", () => {
     const domain = store.createNode("domain", { name: "Auth" });
-    expect(() => store.createNode("endpoint", { name: "x", method: "GET" }, domain.id)).toThrow(ValidationError);
+    expect(() => store.createNode("endpoint", { name: "x", methods: ["GET"] }, domain.id)).toThrow(ValidationError);
   });
 
   it("allows a bare node with missing required fields (a visual editor drops nodes before filling them in)", () => {
@@ -54,7 +54,7 @@ describe("connectNodes", () => {
   });
 
   it("accepts a valid invalidates edge", () => {
-    const endpoint = store.createNode("endpoint", { name: "login", method: "POST" });
+    const endpoint = store.createNode("endpoint", { name: "login", methods: ["POST"] });
     const tool = store.createNode("tool", { name: "redis" });
     const redisKey = store.createNode("redisKey", { keyPattern: "session:*", operation: "SET", toolId: tool.id });
     expect(() => store.connectNodes(endpoint.id, redisKey.id, "invalidates")).not.toThrow();
@@ -65,6 +65,24 @@ describe("connectNodes", () => {
     const tool = store.createNode("tool", { name: "redis" });
     const redisKey = store.createNode("redisKey", { keyPattern: "session:*", operation: "SET", toolId: tool.id });
     expect(() => store.connectNodes(page.id, redisKey.id, "invalidates")).toThrow(ValidationError);
+  });
+});
+
+describe("deleteEdge", () => {
+  it("removes the edge and clears the denormalized parentId", () => {
+    const domain = store.createNode("domain", { name: "Auth" });
+    const route = store.createNode("route", { path: "/login" });
+    const edge = store.connectNodes(domain.id, route.id);
+    expect(store.getNode(route.id)?.parentId).toBe(domain.id);
+
+    store.deleteEdge(edge.id);
+
+    expect(store.getProject("all").edges).toHaveLength(0);
+    expect(store.getNode(route.id)?.parentId).toBeUndefined();
+  });
+
+  it("is a no-op for an unknown edge id", () => {
+    expect(() => store.deleteEdge("does-not-exist")).not.toThrow();
   });
 });
 
@@ -90,7 +108,7 @@ describe("validateProject", () => {
   it("flags a broken ref end to end", () => {
     const domain = store.createNode("domain", { name: "Auth" });
     const route = store.createNode("route", { path: "/login" }, domain.id);
-    const endpoint = store.createNode("endpoint", { name: "login", method: "POST" }, route.id);
+    const endpoint = store.createNode("endpoint", { name: "login", methods: ["POST"] }, route.id);
     const page = store.createNode("page", { name: "LoginPage", path: "/login" });
     const form = store.createNode("form", { name: "LoginForm", fields: [{ name: "email", type: "string" }] }, page.id);
     const apiCall = store.createNode("apiCall", { name: "loginCall", endpointRef: endpoint.id }, form.id);
@@ -113,7 +131,7 @@ describe("deleteNode", () => {
   it("cascades delete through hierarchy descendants", () => {
     const domain = store.createNode("domain", { name: "Auth" });
     const route = store.createNode("route", { path: "/login" }, domain.id);
-    const endpoint = store.createNode("endpoint", { name: "login", method: "POST" }, route.id);
+    const endpoint = store.createNode("endpoint", { name: "login", methods: ["POST"] }, route.id);
     const middleware = store.createNode("middleware", { name: "validateBody" }, endpoint.id);
     void middleware;
 
@@ -126,5 +144,39 @@ describe("deleteNode", () => {
 
     const validation = store.validateProject();
     expect(validation.issues.some((i) => i.code === "INVALID_HIERARCHY")).toBe(false);
+  });
+});
+
+describe("operation method rules", () => {
+  function buildEndpoint(methods: string[]) {
+    const domain = store.createNode("domain", { name: "Auth" });
+    const route = store.createNode("route", { path: "/users" }, domain.id);
+    return store.createNode("endpoint", { name: "users", methods }, route.id);
+  }
+
+  it("rejects an operation method not declared on the parent endpoint", () => {
+    const endpoint = buildEndpoint(["GET", "POST"]);
+    expect(() => store.createNode("operation", { method: "DELETE" }, endpoint.id)).toThrow(ValidationError);
+  });
+
+  it("rejects a duplicate operation method under the same endpoint", () => {
+    const endpoint = buildEndpoint(["GET", "POST"]);
+    store.createNode("operation", { method: "GET" }, endpoint.id);
+    expect(() => store.createNode("operation", { method: "GET" }, endpoint.id)).toThrow(ValidationError);
+  });
+
+  it("allows distinct declared methods across sibling operations", () => {
+    const endpoint = buildEndpoint(["GET", "POST"]);
+    const get = store.createNode("operation", { method: "GET" }, endpoint.id);
+    const post = store.createNode("operation", { method: "POST" }, endpoint.id);
+    expect(get.id).toBeTruthy();
+    expect(post.id).toBeTruthy();
+  });
+
+  it("rejects updating an operation's method into a collision with a sibling", () => {
+    const endpoint = buildEndpoint(["GET", "POST"]);
+    store.createNode("operation", { method: "GET" }, endpoint.id);
+    const post = store.createNode("operation", { method: "POST" }, endpoint.id);
+    expect(() => store.updateNode(post.id, { method: "GET" })).toThrow(ValidationError);
   });
 });

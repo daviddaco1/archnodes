@@ -23,6 +23,16 @@
   color: var(--color-text-faint);
 }
 
+.preview {
+  margin-top: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--color-canvas-soft);
+  border: 1px solid var(--color-border-soft);
+  font-size: 12px;
+  color: var(--color-text);
+}
+
 .suggestions {
   margin-top: var(--space-3);
   padding: var(--space-2) var(--space-3);

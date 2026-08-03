@@ -4,6 +4,7 @@ import {
   validateRequiredFields,
   validateHierarchy,
   validateRefs,
+  validateOperationMethods,
   validateProjectGraph,
 } from "./rules.js";
 import type { AnyGraphNode, GraphEdge, ProjectGraph } from "../types/graph.js";
@@ -27,6 +28,47 @@ describe("canConnect", () => {
   it("rejects domain -> service", () => {
     expect(canConnect("domain", "service")).toBe(false);
   });
+  it("allows websocket -> websocketEvent -> websocketEmit", () => {
+    expect(canConnect("websocket", "websocketEvent")).toBe(true);
+    expect(canConnect("websocketEvent", "websocketEmit")).toBe(true);
+    expect(canConnect("websocketEvent", "service")).toBe(true);
+  });
+  it("allows endpoint -> operation -> middleware/service", () => {
+    expect(canConnect("endpoint", "operation")).toBe(true);
+    expect(canConnect("operation", "middleware")).toBe(true);
+    expect(canConnect("operation", "service")).toBe(true);
+  });
+});
+
+describe("validateOperationMethods", () => {
+  function operation(id: string, parentId: string, method: string): AnyGraphNode {
+    const n = node(id, "operation", { method });
+    n.parentId = parentId;
+    return n;
+  }
+
+  it("flags a method not declared on the parent endpoint", () => {
+    const endpoint = node("e1", "endpoint", { name: "users", methods: ["GET", "POST"] });
+    const op = operation("op1", "e1", "DELETE");
+    const issues = validateOperationMethods([endpoint, op]);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].code).toBe("INVALID_OPERATION_METHOD");
+  });
+
+  it("flags two sibling operations sharing the same method", () => {
+    const endpoint = node("e1", "endpoint", { name: "users", methods: ["GET", "POST"] });
+    const op1 = operation("op1", "e1", "GET");
+    const op2 = operation("op2", "e1", "GET");
+    const issues = validateOperationMethods([endpoint, op1, op2]);
+    expect(issues.some((i) => i.code === "DUPLICATE_OPERATION_METHOD")).toBe(true);
+  });
+
+  it("passes distinct declared methods", () => {
+    const endpoint = node("e1", "endpoint", { name: "users", methods: ["GET", "POST"] });
+    const op1 = operation("op1", "e1", "GET");
+    const op2 = operation("op2", "e1", "POST");
+    expect(validateOperationMethods([endpoint, op1, op2])).toHaveLength(0);
+  });
 });
 
 describe("validateRequiredFields", () => {
@@ -34,11 +76,11 @@ describe("validateRequiredFields", () => {
     const issues = validateRequiredFields(node("e1", "endpoint", { name: "Login" }));
     expect(issues).toHaveLength(1);
     expect(issues[0].code).toBe("MISSING_FIELD");
-    expect(issues[0].field).toBe("method");
+    expect(issues[0].field).toBe("methods");
   });
 
   it("passes when all required fields are present", () => {
-    const issues = validateRequiredFields(node("e1", "endpoint", { name: "Login", method: "POST" }));
+    const issues = validateRequiredFields(node("e1", "endpoint", { name: "Login", methods: ["POST"] }));
     expect(issues).toHaveLength(0);
   });
 });
@@ -79,10 +121,44 @@ describe("validateRefs", () => {
 
   it("passes a valid ref", () => {
     const nodes = [
-      node("e1", "endpoint", { name: "getUser", method: "GET" }),
+      node("e1", "endpoint", { name: "getUser", methods: ["GET"] }),
       node("a1", "apiCall", { name: "getUser", endpointRef: "e1" }),
     ];
     expect(validateRefs(nodes)).toHaveLength(0);
+  });
+
+  it("validates table.dbId", () => {
+    const badNodes = [node("t1", "table", { name: "users", columns: [], dbId: "missing" })];
+    expect(validateRefs(badNodes)[0].code).toBe("BROKEN_REF");
+
+    const goodNodes = [
+      node("d1", "db", { engine: "PostgreSQL", connectionType: "native" }),
+      node("t1", "table", { name: "users", columns: [], dbId: "d1" }),
+    ];
+    expect(validateRefs(goodNodes)).toHaveLength(0);
+  });
+
+  it("validates model.tableId, and lets several models point at the same table", () => {
+    const badNodes = [node("m1", "model", { name: "UserSummary", schema: [], tableId: "missing" })];
+    expect(validateRefs(badNodes)[0].code).toBe("BROKEN_REF");
+
+    const goodNodes = [
+      node("t1", "table", { name: "users", columns: [] }),
+      node("m1", "model", { name: "UserSummary", schema: [], tableId: "t1" }),
+      node("m2", "model", { name: "UserDetail", schema: [], tableId: "t1" }),
+    ];
+    expect(validateRefs(goodNodes)).toHaveLength(0);
+  });
+
+  it("validates chainToId inside middleware.returns[]", () => {
+    const badNodes = [node("m1", "middleware", { name: "auth", returns: [{ status: 401, chainToId: "missing" }] })];
+    expect(validateRefs(badNodes)[0].code).toBe("BROKEN_REF");
+
+    const goodNodes = [
+      node("eh1", "errorHandler", { name: "GlobalHandler", scope: "global" }),
+      node("m1", "middleware", { name: "auth", returns: [{ status: 401, chainToId: "eh1" }] }),
+    ];
+    expect(validateRefs(goodNodes)).toHaveLength(0);
   });
 });
 

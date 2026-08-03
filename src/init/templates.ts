@@ -93,9 +93,11 @@ export function applyTemplate(store: ProjectStore, templateId: string): void {
     databases: [template.database],
   });
 
-  const db = store.createNode("db", { engine: template.database, connectionType: "orm" });
   if (template.orm) {
-    // orm -> db is a ref field (orm.props.dbId), not a hierarchy edge, so no connectNodes call needed.
-    store.createNode("orm", { name: template.orm, dbId: db.id });
+    // Canonical direction is db -> orm (db.props.ormId), a ref field, not a hierarchy edge.
+    const orm = store.createNode("orm", { name: template.orm });
+    store.createNode("db", { engine: template.database, connectionType: "orm", ormId: orm.id });
+  } else {
+    store.createNode("db", { engine: template.database, connectionType: "orm" });
   }
 }
