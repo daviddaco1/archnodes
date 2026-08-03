@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { nodeSchemas } from "../../schema/nodeSchemas";
-import type { AnyGraphNode } from "../../types/graph";
+import type { AnyGraphNode, ModelField, TableColumn } from "../../types/graph";
 import { FieldRenderer } from "./FieldRenderer";
 import { useGraph } from "../../context/GraphContext";
 import * as api from "../../api/client";
@@ -44,6 +44,14 @@ export function PropertyForm({ node, onSaved }: PropertyFormProps) {
     fields = fields.filter((field) => field.key !== "authMethods");
   }
 
+  // A model's fields are a subset of its linked table's columns, not freeform text — once a table
+  // is picked, "schema" becomes a checklist of that table's columns instead of the generic editor.
+  let tableColumns: TableColumn[] | undefined;
+  if (node.type === "model") {
+    const table = nodes.find((n) => n.id === (draft as { tableId?: string }).tableId);
+    if (table?.type === "table") tableColumns = (table.props as { columns?: TableColumn[] }).columns ?? [];
+  }
+
   useEffect(() => {
     setDraft(node.props as Record<string, unknown>);
   }, [node.id, node.props]);
@@ -85,19 +93,67 @@ export function PropertyForm({ node, onSaved }: PropertyFormProps) {
       {saveError && (
         <p style={{ fontSize: 12, color: "var(--color-danger, #e53e3e)", marginBottom: 10 }}>{saveError}</p>
       )}
-      {fields.map((field) => (
-        <div
-          key={field.key}
-          ref={(el) => {
+      {fields.map((field) => {
+        const rowProps = {
+          ref: (el: HTMLDivElement | null) => {
             fieldRefs.current[field.key] = el;
-          }}
-          className={focusField === field.key ? "field-flash" : undefined}
-          style={{ marginBottom: 10 }}
-        >
-          <label style={{ display: "block", fontSize: 12, marginBottom: 4 }}>{field.label}</label>
-          <FieldRenderer field={field} value={draft[field.key]} onChange={(v) => handleChange(field.key, v)} />
-        </div>
-      ))}
+          },
+          className: focusField === field.key ? "field-flash" : undefined,
+          style: { marginBottom: 10 },
+        };
+
+        if (field.key === "schema" && tableColumns !== undefined) {
+          const currentSchema = (draft.schema as ModelField[]) ?? [];
+          const toggleColumn = (column: TableColumn) => {
+            const checked = currentSchema.some((f) => f.name === column.name);
+            const next = checked
+              ? currentSchema.filter((f) => f.name !== column.name)
+              : [...currentSchema, { name: column.name, type: column.type, required: !column.nullable }];
+            handleChange("schema", next);
+          };
+          return (
+            <div key={field.key} {...rowProps}>
+              <label style={{ display: "block", fontSize: 12, marginBottom: 4 }}>{field.label} (de la tabla vinculada)</label>
+              {tableColumns.length === 0 ? (
+                <p style={{ fontSize: 12, color: "var(--color-text-muted)" }}>La tabla vinculada todavía no tiene columnas.</p>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  {tableColumns.map((column) => (
+                    <label key={column.name} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+                      <input
+                        type="checkbox"
+                        checked={currentSchema.some((f) => f.name === column.name)}
+                        onChange={() => toggleColumn(column)}
+                      />
+                      <span className="mono">{column.name}</span>
+                      <span style={{ color: "var(--color-text-muted)" }}>
+                        ({column.type}
+                        {column.nullable ? ", nullable" : ""})
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        }
+
+        if (field.key === "schema" && node.type === "model") {
+          return (
+            <div key={field.key} {...rowProps}>
+              <label style={{ display: "block", fontSize: 12, marginBottom: 4 }}>{field.label}</label>
+              <p style={{ fontSize: 12, color: "var(--color-text-muted)" }}>Vinculá una tabla para elegir sus columnas.</p>
+            </div>
+          );
+        }
+
+        return (
+          <div key={field.key} {...rowProps}>
+            <label style={{ display: "block", fontSize: 12, marginBottom: 4 }}>{field.label}</label>
+            <FieldRenderer field={field} value={draft[field.key]} onChange={(v) => handleChange(field.key, v)} />
+          </div>
+        );
+      })}
     </form>
   );
 }

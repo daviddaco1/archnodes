@@ -20,7 +20,6 @@ export function NoteNode({ data, id }: NodeProps & { data: NoteNodeData }) {
 
   return (
     <div
-      className="nodrag"
       style={{
         width: 200,
         minHeight: 120,
@@ -32,6 +31,7 @@ export function NoteNode({ data, id }: NodeProps & { data: NoteNodeData }) {
       }}
     >
       <textarea
+        className="nodrag"
         value={text}
         onChange={(e) => setText(e.target.value)}
         onBlur={() => void api.updateNode(id, { text }).catch((err) => console.error(err))}

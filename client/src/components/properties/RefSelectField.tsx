@@ -1,5 +1,6 @@
 import { useGraph } from "../../context/GraphContext";
 import { nodeSchemas } from "../../schema/nodeSchemas";
+import { formatSummaryValue } from "../canvas/GenericNode";
 import type { AnyGraphNode } from "../../types/graph";
 import type { FieldDef } from "../../schema/fieldTypes";
 
@@ -12,11 +13,13 @@ interface RefSelectFieldProps {
 function optionLabel(node: AnyGraphNode): string {
   const schema = nodeSchemas[node.type];
   const props = node.props as Record<string, unknown>;
+  const name = (props.name as string) || (props.label as string) || "";
   const summary = schema.summaryFields
-    .map((f) => props[f])
+    .map((f) => formatSummaryValue(props[f]))
     .filter(Boolean)
     .join(" ");
-  return summary || (props.name as string) || schema.type;
+  if (name && summary) return `${name} (${summary})`;
+  return name || summary || schema.type;
 }
 
 export function RefSelectField({ field, value, onChange }: RefSelectFieldProps) {

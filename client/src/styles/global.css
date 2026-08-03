@@ -292,3 +292,31 @@ a {
   background: var(--color-border);
   border-radius: var(--radius-pill);
 }
+
+/* React Flow ships its own light-only stylesheet — the controls/minimap/attribution keep a fixed
+   near-white background while their icons pick up `currentColor` from our theme's text color, so
+   in dark mode the icon (white) ends up on top of react-flow's own unthemed near-white background. */
+.react-flow__controls-button {
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.react-flow__controls-button:hover {
+  background: var(--color-surface-strong);
+}
+
+.react-flow__controls-button svg {
+  fill: var(--color-text);
+}
+
+.react-flow__minimap {
+  background-color: var(--color-surface) !important;
+}
+
+.react-flow__attribution {
+  background: var(--color-surface);
+}
+
+.react-flow__attribution a {
+  color: var(--color-text-muted);
+}

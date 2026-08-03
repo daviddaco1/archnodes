@@ -143,6 +143,7 @@ export const nodeSchemas: Record<NodeType, NodeTypeSchema> = {
     summaryFields: ["name"],
     fields: [
       { key: "name", label: "Nombre", kind: "text" },
+      { key: "tableId", label: "Tabla", kind: "refSelect", refNodeType: "table" },
       {
         key: "schema",
         label: "Campos",
@@ -153,7 +154,6 @@ export const nodeSchemas: Record<NodeType, NodeTypeSchema> = {
           { key: "required", label: "Requerido", kind: "boolean" },
         ],
       },
-      { key: "tableId", label: "Tabla", kind: "refSelect", refNodeType: "table" },
     ],
   },
   table: {

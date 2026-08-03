@@ -2,14 +2,23 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState, t
 import { getProject, getSchema, type SchemaResponse } from "../api/client";
 import type { AnyGraphNode, GraphEdge, ProjectManifest } from "../types/graph";
 import { buildRuleMap, type ConnectionRules } from "../components/canvas/edgeValidation";
-import { buildRefEdgeRules, type RefEdgeRules } from "../components/canvas/refEdges";
+import {
+  buildArrayRefPorts,
+  buildChainTargetTypes,
+  buildRefPortRules,
+  type ArrayRefSpec,
+  type RefPortRules,
+} from "../components/canvas/refEdges";
+import type { NodeType } from "../types/graph";
 
 interface GraphContextValue {
   nodes: AnyGraphNode[];
   edges: GraphEdge[];
   manifest?: ProjectManifest;
   connectionRules: ConnectionRules;
-  refEdgeRules: RefEdgeRules;
+  refPortRules: RefPortRules;
+  arrayRefPorts: Map<NodeType, ArrayRefSpec[]>;
+  chainTargetTypes: Set<NodeType>;
   schema?: SchemaResponse;
   loading: boolean;
   error: string | null;
@@ -52,14 +61,18 @@ export function GraphProvider({ children }: { children: ReactNode }) {
   }, [refetch]);
 
   const connectionRules = useMemo(() => buildRuleMap(schema?.connections ?? []), [schema]);
-  const refEdgeRules = useMemo(() => buildRefEdgeRules(schema?.refFields), [schema]);
+  const refPortRules = useMemo(() => buildRefPortRules(schema?.refFields), [schema]);
+  const arrayRefPorts = useMemo(() => buildArrayRefPorts(schema?.refFields), [schema]);
+  const chainTargetTypes = useMemo(() => buildChainTargetTypes(schema?.refFields), [schema]);
 
   const value: GraphContextValue = {
     nodes,
     edges,
     manifest,
     connectionRules,
-    refEdgeRules,
+    refPortRules,
+    arrayRefPorts,
+    chainTargetTypes,
     schema,
     loading,
     error,

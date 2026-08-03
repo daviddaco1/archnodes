@@ -3,49 +3,136 @@ import type { AnyGraphNode, NodeType } from "../../types/graph";
 
 // Single-value ref fields (props.dbId, props.ormId, etc.) are a real relationship — the backend
 // already validates them (REF_FIELDS) — but until now they were only visible/editable as a
-// dropdown buried in the property panel, invisible on the canvas. This mirrors them as a real,
-// draggable edge: a thin dashed "ref" line, distinct from hierarchy/invalidates.
-// Array-valued ref fields (relations[].targetTableId, returns[].chainToId, ...) are left out —
-// a single edge can't represent "one of many" without a lot more plumbing than the payoff justifies.
+// dropdown buried in the property panel, or a single generic top/bottom dot indistinguishable from
+// every other relationship on the node. This models each one as a dedicated, labeled port, Unity
+// Shader-Graph style: the holder node gets one INPUT port per own field on its LEFT (it needs a
+// value), and the referenced type gets a single generic OUTPUT port on its RIGHT (anyone can wire
+// into it). The holder always keeps the field — this only changes which side of the canvas the dot
+// lives on.
+// Array-valued ref fields where the array holds unrelated free-form items (table.relations[])
+// don't get ports — a single edge can't represent "one of many" cleanly. The one shape that DOES
+// get ports is "returns[].chainToId": each return is already its own named thing (a status code),
+// so each one becomes its own OUTPUT port (middleware/operation choosing where a given outcome
+// routes to), and the chain target (middleware/service/errorHandler) gets one generic INPUT port
+// any of them can land on — mirrors Sample Texture 2D's per-channel outputs in the Unity reference.
 
-export interface RefEdgeSpec {
+export interface RefInputPort {
   field: string;
-  targetType: NodeType;
+  targetTypes: NodeType[];
 }
 
-export type RefEdgeRules = Map<string, RefEdgeSpec>; // key: `${fromType}->${toType}`
+export interface RefOutputOption {
+  holderType: NodeType;
+  field: string;
+}
 
-export function buildRefEdgeRules(refFields: SchemaResponse["refFields"] | undefined): RefEdgeRules {
-  const map: RefEdgeRules = new Map();
-  if (!refFields) return map;
-  for (const [fromType, specs] of Object.entries(refFields) as [NodeType, RefFieldSpec[]][]) {
+export const REF_OUTPUT_HANDLE = "ref-out";
+
+export interface RefPortRules {
+  inputs: Map<NodeType, RefInputPort[]>; // holder type -> its own ports (left side)
+  outputs: Map<NodeType, RefOutputOption[]>; // referenced type -> who can point at it (right side)
+}
+
+export function buildRefPortRules(refFields: SchemaResponse["refFields"] | undefined): RefPortRules {
+  const inputs: RefPortRules["inputs"] = new Map();
+  const outputs: RefPortRules["outputs"] = new Map();
+  if (!refFields) return { inputs, outputs };
+  for (const [holderType, specs] of Object.entries(refFields) as [NodeType, RefFieldSpec[]][]) {
     for (const spec of specs) {
       if (spec.array) continue;
       const targetTypes = Array.isArray(spec.targetType) ? spec.targetType : [spec.targetType];
+      const inList = inputs.get(holderType) ?? [];
+      inList.push({ field: spec.field, targetTypes });
+      inputs.set(holderType, inList);
       for (const targetType of targetTypes) {
-        map.set(`${fromType}->${targetType}`, { field: spec.field, targetType });
+        const outList = outputs.get(targetType) ?? [];
+        outList.push({ holderType, field: spec.field });
+        outputs.set(targetType, outList);
       }
+    }
+  }
+  return { inputs, outputs };
+}
+
+export function refInputPort(rules: RefPortRules, holderType: NodeType, field: string): RefInputPort | undefined {
+  return rules.inputs.get(holderType)?.find((p) => p.field === field);
+}
+
+export interface ArrayRefSpec {
+  arrayField: string;
+  itemField: string;
+  targetTypes: NodeType[];
+}
+
+export const CHAIN_INPUT_HANDLE = "chain-in";
+
+function parseArraySpec(spec: RefFieldSpec): ArrayRefSpec | undefined {
+  if (!spec.array || !spec.field.includes("[].")) return undefined;
+  const [arrayField, itemField] = spec.field.split("[].");
+  const targetTypes = Array.isArray(spec.targetType) ? spec.targetType : [spec.targetType];
+  return { arrayField, itemField, targetTypes };
+}
+
+// holder type -> its own array-item ports (right side, one row per array entry)
+export function buildArrayRefPorts(refFields: SchemaResponse["refFields"] | undefined): Map<NodeType, ArrayRefSpec[]> {
+  const map = new Map<NodeType, ArrayRefSpec[]>();
+  if (!refFields) return map;
+  for (const [holderType, specs] of Object.entries(refFields) as [NodeType, RefFieldSpec[]][]) {
+    for (const spec of specs) {
+      const parsed = parseArraySpec(spec);
+      if (!parsed) continue;
+      const list = map.get(holderType) ?? [];
+      list.push(parsed);
+      map.set(holderType, list);
     }
   }
   return map;
 }
 
-export function refEdgeSpec(rules: RefEdgeRules, sourceType: NodeType, targetType: NodeType): RefEdgeSpec | undefined {
-  return rules.get(`${sourceType}->${targetType}`);
+// Every type any array-item port can chain into — they all share one generic input port (left).
+export function buildChainTargetTypes(refFields: SchemaResponse["refFields"] | undefined): Set<NodeType> {
+  const set = new Set<NodeType>();
+  if (!refFields) return set;
+  for (const specs of Object.values(refFields) as RefFieldSpec[][]) {
+    for (const spec of specs) {
+      const parsed = parseArraySpec(spec);
+      parsed?.targetTypes.forEach((t) => set.add(t));
+    }
+  }
+  return set;
 }
 
-export function refEdgeTargetTypesFrom(rules: RefEdgeRules, sourceType: NodeType): NodeType[] {
-  const prefix = `${sourceType}->`;
-  const out: NodeType[] = [];
-  for (const key of rules.keys()) if (key.startsWith(prefix)) out.push(key.slice(prefix.length) as NodeType);
-  return out;
+export function chainPortHandle(arrayField: string, index: number): string {
+  return `chain__${arrayField}__${index}`;
 }
 
-export function refEdgeSourceTypesTo(rules: RefEdgeRules, targetType: NodeType): NodeType[] {
-  const suffix = `->${targetType}`;
-  const out: NodeType[] = [];
-  for (const key of rules.keys()) if (key.endsWith(suffix)) out.push(key.slice(0, -suffix.length) as NodeType);
-  return out;
+export interface SyntheticChainEdge {
+  id: string;
+  source: string; // the node choosing where this outcome routes to
+  target: string; // the chain-in receiver
+  sourceHandle: string;
+}
+
+// Synthesizes one edge per array item that currently has its chain target set — same "derived,
+// never stored" spirit as synthesizeRefEdges, just indexed into an array instead of a plain field.
+export function synthesizeChainEdges(nodes: AnyGraphNode[], refFields: SchemaResponse["refFields"] | undefined): SyntheticChainEdge[] {
+  if (!refFields) return [];
+  const nodeIds = new Set(nodes.map((n) => n.id));
+  const edges: SyntheticChainEdge[] = [];
+  for (const node of nodes) {
+    const specs = (refFields[node.type as NodeType] ?? []).map(parseArraySpec).filter((s): s is ArrayRefSpec => Boolean(s));
+    for (const spec of specs) {
+      const items = (node.props as Record<string, unknown>)[spec.arrayField];
+      if (!Array.isArray(items)) continue;
+      items.forEach((item, index) => {
+        const value = (item as Record<string, unknown> | null)?.[spec.itemField];
+        if (typeof value === "string" && value && nodeIds.has(value)) {
+          edges.push({ id: `${refEdgeId(node.id, spec.arrayField)}__${index}`, source: node.id, target: value, sourceHandle: chainPortHandle(spec.arrayField, index) });
+        }
+      });
+    }
+  }
+  return edges;
 }
 
 const REF_EDGE_PREFIX = "ref__";
@@ -63,8 +150,8 @@ export function parseRefEdgeId(id: string): { nodeId: string; field: string } | 
 
 export interface SyntheticRefEdge {
   id: string;
-  source: string;
-  target: string;
+  source: string; // the referenced node — has the output port
+  target: string; // the node holding the field — has the input port
   field: string;
 }
 
@@ -82,7 +169,7 @@ export function synthesizeRefEdges(nodes: AnyGraphNode[], refFields: SchemaRespo
       if (spec.array) continue;
       const value = props[spec.field];
       if (typeof value === "string" && value && nodeIds.has(value)) {
-        edges.push({ id: refEdgeId(node.id, spec.field), source: node.id, target: value, field: spec.field });
+        edges.push({ id: refEdgeId(node.id, spec.field), source: value, target: node.id, field: spec.field });
       }
     }
   }

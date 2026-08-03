@@ -8,18 +8,17 @@ import type { AnyGraphNode, GraphEdge, MiddlewareProps, NodeType, ServiceProps, 
 import { PropertyForm } from "./PropertyForm";
 import styles from "./PropertyPanel.module.css";
 
-function resolveEndpointChain(
-  endpointId: string,
-  nodes: AnyGraphNode[],
-  edges: GraphEdge[],
-): { middlewares: AnyGraphNode[]; service?: AnyGraphNode } {
+// Walks the middleware chain starting at an endpoint OR an operation — a GET's middleware can
+// short-circuit with its own early response, or call next() and let the endpoint/operation send
+// the final code itself. Same shape for both: whichever one directly owns the chain.
+function resolveChain(startId: string, nodes: AnyGraphNode[], edges: GraphEdge[]): { middlewares: AnyGraphNode[]; service?: AnyGraphNode } {
   const nodesById = new Map(nodes.map((n) => [n.id, n]));
   const childrenOf = (id: string) =>
     edges.filter((e) => e.edgeType === "hierarchy" && e.source === id).map((e) => nodesById.get(e.target)).filter((n): n is AnyGraphNode => Boolean(n));
 
   const middlewares: AnyGraphNode[] = [];
   let service: AnyGraphNode | undefined;
-  let currentId = endpointId;
+  let currentId = startId;
   for (let i = 0; i < nodes.length; i++) {
     const children = childrenOf(currentId);
     const mw = children.find((c) => c.type === "middleware");
@@ -41,8 +40,8 @@ export function PropertyPanel() {
   const node = nodes.find((n) => n.id === selectedNodeId);
 
   const inheritedReturns = useMemo(() => {
-    if (!node || node.type !== "endpoint") return [];
-    const { middlewares, service } = resolveEndpointChain(node.id, nodes, edges);
+    if (!node || (node.type !== "endpoint" && node.type !== "operation")) return [];
+    const { middlewares, service } = resolveChain(node.id, nodes, edges);
     const rows: { status: string | number; description?: string; source: string }[] = [];
     for (const mw of middlewares) {
       const mwProps = mw.props as MiddlewareProps;
@@ -130,7 +129,10 @@ export function PropertyPanel() {
 
       {inheritedReturns.length > 0 && (
         <div className={styles.preview}>
-          <div style={{ marginBottom: 6, fontWeight: 500 }}>Outputs heredados (middleware / service)</div>
+          <div style={{ marginBottom: 2, fontWeight: 500 }}>Outputs heredados (middleware / service)</div>
+          <div style={{ marginBottom: 6, fontSize: 11, color: "var(--color-text-muted)" }}>
+            El middleware puede responder antes (short-circuit); si llama a next(), el código final lo envía este nodo.
+          </div>
           {inheritedReturns.map((r, i) => (
             <div key={i} style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
               <span className="mono">{r.status}</span>

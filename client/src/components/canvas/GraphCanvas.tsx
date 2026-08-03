@@ -24,14 +24,17 @@ import * as api from "../../api/client";
 import type { SchemaResponse } from "../../api/client";
 import { compatibleSources, compatibleTargets, edgeKind, type ConnectionRules } from "./edgeValidation";
 import {
+  chainPortHandle,
   parseRefEdgeId,
-  refEdgeSourceTypesTo,
-  refEdgeSpec,
-  refEdgeTargetTypesFrom,
+  refInputPort,
+  synthesizeChainEdges,
   synthesizeRefEdges,
-  type RefEdgeRules,
+  CHAIN_INPUT_HANDLE,
+  REF_OUTPUT_HANDLE,
+  type ArrayRefSpec,
+  type RefPortRules,
 } from "./refEdges";
-import { GenericNode, type GenericNodeData } from "./GenericNode";
+import { GenericNode, type GenericNodeData, type ChainOutputPortData, type RefInputPortData, type RefOutputOptionData } from "./GenericNode";
 import { ContainerNode, type ContainerNodeData } from "./ContainerNode";
 import { NoteNode, type NoteNodeData } from "./NoteNode";
 import styles from "./GraphCanvas.module.css";
@@ -63,21 +66,27 @@ interface NodeMenuState {
   y: number;
 }
 
-function isConnectable(
-  connectionRules: ConnectionRules,
-  refEdgeRules: RefEdgeRules,
-  sourceType: NodeType,
-  targetType: NodeType,
-): boolean {
-  return edgeKind(connectionRules, sourceType, targetType) !== undefined || Boolean(refEdgeSpec(refEdgeRules, sourceType, targetType));
+function isHierarchyConnectable(connectionRules: ConnectionRules, sourceType: NodeType, targetType: NodeType): boolean {
+  return edgeKind(connectionRules, sourceType, targetType) !== undefined;
+}
+
+function chainPortLabel(item: unknown): string {
+  const props = (item ?? {}) as Record<string, unknown>;
+  const status = props.status !== undefined && props.status !== "" ? String(props.status) : "?";
+  const description = typeof props.description === "string" && props.description ? `: ${props.description}` : "";
+  return `${status}${description}`;
 }
 
 function toRFNodes(
   nodes: AnyGraphNode[],
   connectionRules: ConnectionRules,
-  refEdgeRules: RefEdgeRules,
+  refPortRules: RefPortRules,
+  arrayRefPorts: Map<NodeType, ArrayRefSpec[]>,
+  chainTargetTypes: Set<NodeType>,
   onQuickAdd: (sourceId: string, targetType: NodeType) => void,
   onQuickAddIncoming: (targetId: string, sourceType: NodeType) => void,
+  onRefInputQuickAdd: (nodeId: string, field: string, targetType: NodeType) => void,
+  onRefOutputQuickAdd: (nodeId: string, holderType: NodeType, field: string) => void,
   connecting: ConnectingState | null,
 ): RFNode<GenericNodeData | ContainerNodeData | NoteNodeData>[] {
   const nodesById = new Map(nodes.map((node) => [node.id, node]));
@@ -109,12 +118,24 @@ function toRFNodes(
     if (connecting && n.id !== connecting.nodeId) {
       const isValid =
         connecting.handleType === "source"
-          ? isConnectable(connectionRules, refEdgeRules, connecting.nodeType, n.type)
-          : isConnectable(connectionRules, refEdgeRules, n.type, connecting.nodeType);
+          ? isHierarchyConnectable(connectionRules, connecting.nodeType, n.type)
+          : isHierarchyConnectable(connectionRules, n.type, connecting.nodeType);
       highlight = isValid ? "valid" : "invalid";
     }
-    const outgoingTypes = [...new Set([...compatibleTargets(connectionRules, n.type), ...refEdgeTargetTypesFrom(refEdgeRules, n.type)])];
-    const incomingTypes = [...new Set([...compatibleSources(connectionRules, n.type), ...refEdgeSourceTypesTo(refEdgeRules, n.type)])];
+    const outgoingTypes = compatibleTargets(connectionRules, n.type);
+    const incomingTypes = compatibleSources(connectionRules, n.type);
+    const refInputPorts: RefInputPortData[] = (refPortRules.inputs.get(n.type) ?? []).map((port) => ({
+      field: port.field,
+      label: nodeSchemas[n.type].fields.find((f) => f.key === port.field)?.label ?? port.field,
+      targetTypes: port.targetTypes,
+    }));
+    const refOutputOptions: RefOutputOptionData[] = refPortRules.outputs.get(n.type) ?? [];
+    const chainOutputPorts: ChainOutputPortData[] = (arrayRefPorts.get(n.type) ?? []).flatMap((spec) => {
+      const items = (n.props as Record<string, unknown>)[spec.arrayField];
+      if (!Array.isArray(items)) return [];
+      return items.map((item, index) => ({ handleId: chainPortHandle(spec.arrayField, index), label: chainPortLabel(item) }));
+    });
+    const hasChainInput = chainTargetTypes.has(n.type);
 
     let resolvedTitle: string | undefined;
     if (n.type === "subdomain") {
@@ -144,6 +165,12 @@ function toRFNodes(
         canReceiveConnection: incomingTypes.length > 0,
         onQuickAdd: (targetType: NodeType) => onQuickAdd(n.id, targetType),
         onQuickAddIncoming: (sourceType: NodeType) => onQuickAddIncoming(n.id, sourceType),
+        refInputPorts,
+        refOutputOptions,
+        onRefInputQuickAdd: (field: string, targetType: NodeType) => onRefInputQuickAdd(n.id, field, targetType),
+        onRefOutputQuickAdd: (holderType: NodeType, field: string) => onRefOutputQuickAdd(n.id, holderType, field),
+        chainOutputPorts,
+        hasChainInput,
       },
     };
   });
@@ -159,8 +186,8 @@ function toRFEdges(edges: GraphEdge[]): RFEdge[] {
 }
 
 // A ref field pointing at the same node a hierarchy/invalidates edge already connects (e.g.
-// subdomain.domainId mirroring the domain -> subdomain hierarchy edge, just reversed) would draw
-// a redundant second line — skip those, the real edge already shows the relationship.
+// subdomain.domainId mirroring the domain -> subdomain hierarchy edge) would draw a redundant
+// second line — skip those, the real edge already shows the relationship.
 function toSyntheticRefRFEdges(nodes: AnyGraphNode[], refFields: SchemaResponse["refFields"] | undefined, existingEdges: GraphEdge[]): RFEdge[] {
   const connectedPairs = new Set(existingEdges.map((e) => [e.source, e.target].sort().join("::")));
   return synthesizeRefEdges(nodes, refFields)
@@ -169,13 +196,37 @@ function toSyntheticRefRFEdges(nodes: AnyGraphNode[], refFields: SchemaResponse[
       id: e.id,
       source: e.source,
       target: e.target,
+      sourceHandle: REF_OUTPUT_HANDLE,
+      targetHandle: e.field,
       style: { stroke: "var(--color-preview)", strokeDasharray: "2 3" },
       data: { isRef: true, field: e.field },
     }));
 }
 
+function toChainRFEdges(nodes: AnyGraphNode[], refFields: SchemaResponse["refFields"] | undefined): RFEdge[] {
+  return synthesizeChainEdges(nodes, refFields).map((e) => ({
+    id: e.id,
+    source: e.source,
+    target: e.target,
+    sourceHandle: e.sourceHandle,
+    targetHandle: CHAIN_INPUT_HANDLE,
+    style: { stroke: "var(--color-preview)", strokeDasharray: "2 3" },
+    data: { isRef: true },
+  }));
+}
+
 export function GraphCanvas({ category }: GraphCanvasProps) {
-  const { nodes: graphNodes, edges: graphEdges, connectionRules, refEdgeRules, schema, refetch, setSelectedNodeId } = useGraph();
+  const {
+    nodes: graphNodes,
+    edges: graphEdges,
+    connectionRules,
+    refPortRules,
+    arrayRefPorts,
+    chainTargetTypes,
+    schema,
+    refetch,
+    setSelectedNodeId,
+  } = useGraph();
   const { screenToFlowPosition } = useReactFlow();
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const [connecting, setConnecting] = useState<ConnectingState | null>(null);
@@ -199,22 +250,18 @@ export function GraphCanvas({ category }: GraphCanvasProps) {
       const source = nodesById.get(sourceId);
       if (!source) return;
       try {
+        const kind = edgeKind(connectionRules, source.type, targetType);
+        if (!kind) return;
         const created = await api.createNode(targetType, defaultCompanionProps(targetType, graphNodes));
         await api.updateNodePosition(created.id, { x: source.position.x + 40, y: source.position.y + 160 });
-        const kind = edgeKind(connectionRules, source.type, targetType);
-        if (kind) {
-          await api.createEdge(sourceId, created.id, kind);
-        } else {
-          const ref = refEdgeSpec(refEdgeRules, source.type, targetType);
-          if (ref) await api.updateNode(sourceId, { [ref.field]: created.id });
-        }
+        await api.createEdge(sourceId, created.id, kind);
         await refetch();
         setSelectedNodeId(created.id);
       } catch (err) {
         console.error(err);
       }
     },
-    [nodesById, graphNodes, connectionRules, refEdgeRules, refetch, setSelectedNodeId],
+    [nodesById, graphNodes, connectionRules, refetch, setSelectedNodeId],
   );
 
   const handleQuickAddIncoming = useCallback(
@@ -222,22 +269,52 @@ export function GraphCanvas({ category }: GraphCanvasProps) {
       const target = nodesById.get(targetId);
       if (!target) return;
       try {
+        const kind = edgeKind(connectionRules, sourceType, target.type);
+        if (!kind) return;
         const created = await api.createNode(sourceType, defaultCompanionProps(sourceType, graphNodes));
         await api.updateNodePosition(created.id, { x: target.position.x + 40, y: target.position.y - 160 });
-        const kind = edgeKind(connectionRules, sourceType, target.type);
-        if (kind) {
-          await api.createEdge(created.id, targetId, kind);
-        } else {
-          const ref = refEdgeSpec(refEdgeRules, sourceType, target.type);
-          if (ref) await api.updateNode(created.id, { [ref.field]: targetId });
-        }
+        await api.createEdge(created.id, targetId, kind);
         await refetch();
         setSelectedNodeId(created.id);
       } catch (err) {
         console.error(err);
       }
     },
-    [nodesById, graphNodes, connectionRules, refEdgeRules, refetch, setSelectedNodeId],
+    [nodesById, graphNodes, connectionRules, refetch, setSelectedNodeId],
+  );
+
+  const handleRefInputQuickAdd = useCallback(
+    async (nodeId: string, field: string, targetType: NodeType) => {
+      const node = nodesById.get(nodeId);
+      if (!node) return;
+      try {
+        const created = await api.createNode(targetType, defaultCompanionProps(targetType, graphNodes));
+        await api.updateNodePosition(created.id, { x: node.position.x - 220, y: node.position.y });
+        await api.updateNode(nodeId, { [field]: created.id });
+        await refetch();
+        setSelectedNodeId(created.id);
+      } catch (err) {
+        console.error(err);
+      }
+    },
+    [nodesById, graphNodes, refetch, setSelectedNodeId],
+  );
+
+  const handleRefOutputQuickAdd = useCallback(
+    async (nodeId: string, holderType: NodeType, field: string) => {
+      const node = nodesById.get(nodeId);
+      if (!node) return;
+      try {
+        const created = await api.createNode(holderType, defaultCompanionProps(holderType, graphNodes));
+        await api.updateNodePosition(created.id, { x: node.position.x + 220, y: node.position.y });
+        await api.updateNode(created.id, { [field]: nodeId });
+        await refetch();
+        setSelectedNodeId(created.id);
+      } catch (err) {
+        console.error(err);
+      }
+    },
+    [nodesById, graphNodes, refetch, setSelectedNodeId],
   );
 
   const edgeMenuRef = useRef<HTMLDivElement>(null);
@@ -320,19 +397,66 @@ export function GraphCanvas({ category }: GraphCanvasProps) {
   const [rfEdges, setRfEdges, onEdgesChange] = useEdgesState<RFEdge>([]);
 
   useEffect(() => {
-    setRfNodes(toRFNodes(categoryNodes, connectionRules, refEdgeRules, handleQuickAdd, handleQuickAddIncoming, connecting));
-    setRfEdges([...toRFEdges(categoryEdges), ...toSyntheticRefRFEdges(categoryNodes, schema?.refFields, categoryEdges)]);
+    setRfNodes(
+      toRFNodes(
+        categoryNodes,
+        connectionRules,
+        refPortRules,
+        arrayRefPorts,
+        chainTargetTypes,
+        handleQuickAdd,
+        handleQuickAddIncoming,
+        handleRefInputQuickAdd,
+        handleRefOutputQuickAdd,
+        connecting,
+      ),
+    );
+    setRfEdges([
+      ...toRFEdges(categoryEdges),
+      ...toSyntheticRefRFEdges(categoryNodes, schema?.refFields, categoryEdges),
+      ...toChainRFEdges(categoryNodes, schema?.refFields),
+    ]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [categoryNodes, categoryEdges, connectionRules, refEdgeRules, schema, handleQuickAdd, handleQuickAddIncoming, connecting]);
+  }, [
+    categoryNodes,
+    categoryEdges,
+    connectionRules,
+    refPortRules,
+    arrayRefPorts,
+    chainTargetTypes,
+    schema,
+    handleQuickAdd,
+    handleQuickAddIncoming,
+    handleRefInputQuickAdd,
+    handleRefOutputQuickAdd,
+    connecting,
+  ]);
+
+  const chainSpecForHandle = useCallback(
+    (sourceType: NodeType, sourceHandle: string): ArrayRefSpec | undefined => {
+      if (!sourceHandle.startsWith("chain__")) return undefined;
+      const [, arrayField] = sourceHandle.split("__");
+      return (arrayRefPorts.get(sourceType) ?? []).find((s) => s.arrayField === arrayField);
+    },
+    [arrayRefPorts],
+  );
 
   const isValidConnection = useCallback(
     (connection: Connection | RFEdge) => {
       const source = nodesById.get(connection.source ?? "");
       const target = nodesById.get(connection.target ?? "");
       if (!source || !target) return false;
-      return isConnectable(connectionRules, refEdgeRules, source.type, target.type);
+      if (connection.targetHandle === CHAIN_INPUT_HANDLE) {
+        const spec = connection.sourceHandle ? chainSpecForHandle(source.type, connection.sourceHandle) : undefined;
+        return Boolean(spec && spec.targetTypes.includes(target.type));
+      }
+      if (connection.targetHandle) {
+        const port = refInputPort(refPortRules, target.type, connection.targetHandle);
+        return Boolean(port && port.targetTypes.includes(source.type));
+      }
+      return edgeKind(connectionRules, source.type, target.type) !== undefined;
     },
-    [connectionRules, refEdgeRules, nodesById],
+    [connectionRules, refPortRules, chainSpecForHandle, nodesById],
   );
 
   const handleConnect = useCallback(
@@ -342,20 +466,29 @@ export function GraphCanvas({ category }: GraphCanvasProps) {
       const target = nodesById.get(connection.target);
       if (!source || !target) return;
       try {
-        const kind = edgeKind(connectionRules, source.type, target.type);
-        if (kind) {
-          await api.createEdge(connection.source, connection.target, kind);
+        if (connection.targetHandle === CHAIN_INPUT_HANDLE && connection.sourceHandle) {
+          const spec = chainSpecForHandle(source.type, connection.sourceHandle);
+          if (!spec || !spec.targetTypes.includes(target.type)) return;
+          const index = Number(connection.sourceHandle.split("__")[2]);
+          const items = [...(((source.props as Record<string, unknown>)[spec.arrayField] as Record<string, unknown>[]) ?? [])];
+          if (!items[index]) return;
+          items[index] = { ...items[index], [spec.itemField]: connection.target };
+          await api.updateNode(connection.source, { [spec.arrayField]: items });
+        } else if (connection.targetHandle) {
+          const port = refInputPort(refPortRules, target.type, connection.targetHandle);
+          if (!port || !port.targetTypes.includes(source.type)) return;
+          await api.updateNode(connection.target, { [connection.targetHandle]: connection.source });
         } else {
-          const ref = refEdgeSpec(refEdgeRules, source.type, target.type);
-          if (!ref) return;
-          await api.updateNode(connection.source, { [ref.field]: connection.target });
+          const kind = edgeKind(connectionRules, source.type, target.type);
+          if (!kind) return;
+          await api.createEdge(connection.source, connection.target, kind);
         }
         await refetch();
       } catch (err) {
         console.error(err);
       }
     },
-    [connectionRules, refEdgeRules, nodesById, refetch],
+    [connectionRules, refPortRules, chainSpecForHandle, nodesById, refetch],
   );
 
   const handleConnectStart: OnConnectStart = useCallback(
@@ -466,6 +599,7 @@ export function GraphCanvas({ category }: GraphCanvasProps) {
         nodes={rfNodes}
         edges={rfEdges}
         nodeTypes={nodeTypes}
+        defaultEdgeOptions={{ type: "smoothstep" }}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onConnect={handleConnect}
@@ -564,7 +698,20 @@ export function GraphCanvas({ category }: GraphCanvasProps) {
               className="btn-secondary"
               onClick={() => {
                 setPendingDeleteId(null);
-                setRfNodes(toRFNodes(categoryNodes, connectionRules, refEdgeRules, handleQuickAdd, handleQuickAddIncoming, null));
+                setRfNodes(
+                  toRFNodes(
+                    categoryNodes,
+                    connectionRules,
+                    refPortRules,
+                    arrayRefPorts,
+                    chainTargetTypes,
+                    handleQuickAdd,
+                    handleQuickAddIncoming,
+                    handleRefInputQuickAdd,
+                    handleRefOutputQuickAdd,
+                    null,
+                  ),
+                );
               }}
             >
               Cancelar
