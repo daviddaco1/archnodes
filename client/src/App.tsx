@@ -15,8 +15,14 @@ function AppShell() {
   const [tab, setTab] = useState<TabKey>("backend");
   const [validation, setValidation] = useState<ValidationResult | null>(null);
 
-  if (loading) return <div style={{ padding: 24 }}>Cargando proyecto...</div>;
-  if (error) return <div style={{ padding: 24, color: "var(--color-danger)" }}>Error: {error}</div>;
+  if (loading)
+    return (
+      <div style={{ padding: 24, color: "var(--color-text-muted)", fontSize: 14 }}>Cargando proyecto...</div>
+    );
+  if (error)
+    return (
+      <div style={{ padding: 24, color: "var(--color-danger)", fontSize: 14 }}>Error: {error}</div>
+    );
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh" }}>

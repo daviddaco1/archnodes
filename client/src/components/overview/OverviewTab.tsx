@@ -49,7 +49,7 @@ export function OverviewTab() {
 
   return (
     <div className={styles.wrapper}>
-      <h3>Referencias cruzadas Frontend → Backend</h3>
+      <h3 className={styles.heading}>Referencias cruzadas Frontend → Backend</h3>
       <input className={styles.filter} placeholder="Filtrar..." value={filter} onChange={(e) => setFilter(e.target.value)} />
       <table>
         <thead>

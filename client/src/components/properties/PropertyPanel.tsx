@@ -62,8 +62,10 @@ export function PropertyPanel() {
   return (
     <div className={styles.panel}>
       <div className={styles.header}>
-        <strong>{schema.type}</strong>
-        <button onClick={() => setSelectedNodeId(null)}>×</button>
+        <span className={styles.headerTitle}>{schema.type}</span>
+        <button className="btn-icon" onClick={() => setSelectedNodeId(null)}>
+          ×
+        </button>
       </div>
 
       <PropertyForm node={node} onSaved={refetch} />
@@ -80,11 +82,11 @@ export function PropertyPanel() {
         </div>
       )}
 
-      <div style={{ marginTop: 16, borderTop: "1px solid var(--color-border)", paddingTop: 12 }}>
-        <label style={{ display: "block", fontSize: 12, marginBottom: 6 }}>
+      <div className={styles.footer}>
+        <label style={{ display: "block", marginBottom: 8 }}>
           <input type="checkbox" checked={cascade} onChange={(e) => setCascade(e.target.checked)} /> Eliminar también sus hijos
         </label>
-        <button className={styles.danger} onClick={() => void handleDelete()}>
+        <button className="btn-danger" onClick={() => void handleDelete()}>
           Eliminar nodo
         </button>
       </div>

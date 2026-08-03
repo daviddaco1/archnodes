@@ -22,7 +22,7 @@ export function GenericNode({ data, selected }: NodeProps & { data: GenericNodeD
       <Handle type="target" position={Position.Top} />
       <div className={styles.header} style={{ background: schema.color }}>
         <span className={styles.icon}>{schema.icon}</span>
-        <span>{schema.type}</span>
+        <span className={styles.type}>{schema.type}</span>
       </div>
       <div className={styles.body}>
         <div>{title}</div>

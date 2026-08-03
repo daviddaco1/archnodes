@@ -181,13 +181,14 @@ export function GraphCanvas({ category }: GraphCanvasProps) {
         <MiniMap pannable zoomable />
       </ReactFlow>
       {pendingDeleteId && (
-        <div style={{ position: "absolute", top: 12, right: 12, background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: 6, padding: 12, zIndex: 10 }}>
-          <div style={{ marginBottom: 8, fontSize: 13 }}>¿Eliminar este nodo?</div>
-          <label style={{ display: "block", fontSize: 12, marginBottom: 8 }}>
+        <div className="card" style={{ position: "absolute", top: 16, right: 16, padding: 16, zIndex: 10, width: 260 }}>
+          <div style={{ marginBottom: 10, fontSize: 13, fontWeight: 500 }}>¿Eliminar este nodo?</div>
+          <label style={{ display: "block", marginBottom: 12 }}>
             <input type="checkbox" id="cascade-checkbox" /> Eliminar también sus hijos (cascade)
           </label>
           <div style={{ display: "flex", gap: 8 }}>
             <button
+              className="btn-danger"
               onClick={() => {
                 const checkbox = document.getElementById("cascade-checkbox") as HTMLInputElement | null;
                 void confirmDelete(Boolean(checkbox?.checked));
@@ -196,6 +197,7 @@ export function GraphCanvas({ category }: GraphCanvasProps) {
               Eliminar
             </button>
             <button
+              className="btn-secondary"
               onClick={() => {
                 setPendingDeleteId(null);
                 setRfNodes(toRFNodes(categoryNodes));

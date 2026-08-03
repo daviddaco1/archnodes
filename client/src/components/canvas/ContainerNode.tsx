@@ -12,12 +12,22 @@ export function ContainerNode({ data, selected }: NodeProps & { data: ContainerN
         width: "100%",
         height: "100%",
         border: "2px dashed var(--color-border)",
-        borderRadius: 8,
-        background: "rgba(128,128,128,0.06)",
+        borderRadius: "var(--radius-lg)",
+        background: "var(--color-canvas-soft)",
       }}
     >
-      <NodeResizer isVisible={selected} minWidth={160} minHeight={120} />
-      <div style={{ padding: 6, fontSize: 12, fontWeight: 600, color: "var(--color-text-muted)" }}>
+      <NodeResizer isVisible={selected} minWidth={160} minHeight={120} lineStyle={{ borderColor: "var(--color-text)" }} />
+      <div
+        style={{
+          padding: "6px 10px",
+          fontFamily: "var(--font-mono)",
+          fontSize: 11,
+          fontWeight: 500,
+          textTransform: "uppercase",
+          letterSpacing: "0.06em",
+          color: "var(--color-text-faint)",
+        }}
+      >
         {data.props.label || "Contenedor"}
       </div>
     </div>

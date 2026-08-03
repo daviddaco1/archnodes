@@ -1,30 +1,105 @@
+/* Design tokens adapted from the Expo marketing-site design system (DESIGN-expo.md).
+   Light theme maps 1:1 to their tokens; dark theme is derived from their own
+   surface-dark / on-dark tokens (the source system is light-only marketing copy —
+   this app runs all day as a dev tool, so it needs a usable dark mode too). */
 :root {
-  --color-bg: #f7fafc;
+  /* color */
+  --color-canvas: #ffffff;
+  --color-canvas-soft: #fafafa;
   --color-surface: #ffffff;
-  --color-border: #e2e8f0;
-  --color-text: #1a202c;
-  --color-text-muted: #718096;
-  --color-backend: #2b6cb0;
-  --color-frontend: #dd6b20;
-  --color-accent: #2f855a;
-  --color-danger: #c53030;
+  --color-surface-strong: #f0f0f3;
+  --color-border: #dcdee0;
+  --color-border-soft: #f0f0f3;
+  --color-text: #171717;
+  --color-text-muted: #60646c;
+  --color-text-faint: #999999;
+  --color-primary: #000000;
+  --color-primary-active: #1a1a1a;
+  --color-on-primary: #ffffff;
+  --color-link: #0d74ce;
+  --color-backend: #0d74ce;
+  --color-frontend: #ab6400;
+  --color-accent: #16a34a;
+  --color-danger: #c0392b;
+  --color-preview: #8145b5;
+
+  /* type */
+  --font-sans: "Inter", -apple-system, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", monospace;
+
+  /* radius */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-pill: 9999px;
+
+  /* space */
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 16px;
   --space-4: 24px;
+
+  --shadow-soft: 0 4px 12px rgba(0, 0, 0, 0.06);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --color-bg: #1a202c;
-    --color-surface: #2d3748;
-    --color-border: #4a5568;
-    --color-text: #f7fafc;
-    --color-text-muted: #a0aec0;
+    --color-canvas: #171717;
+    --color-canvas-soft: #1a1a1a;
+    --color-surface: #1a1a1a;
+    --color-surface-strong: #232323;
+    --color-border: #33353a;
+    --color-border-soft: #262626;
+    --color-text: #ffffff;
+    --color-text-muted: #b0b4ba;
+    --color-text-faint: #7a7d82;
+    --color-primary: #ffffff;
+    --color-primary-active: #e5e5e5;
+    --color-on-primary: #000000;
+    --color-link: #47c2ff;
+    --shadow-soft: 0 4px 12px rgba(0, 0, 0, 0.35);
   }
 }
 
-* {
+:root[data-theme="dark"] {
+  --color-canvas: #171717;
+  --color-canvas-soft: #1a1a1a;
+  --color-surface: #1a1a1a;
+  --color-surface-strong: #232323;
+  --color-border: #33353a;
+  --color-border-soft: #262626;
+  --color-text: #ffffff;
+  --color-text-muted: #b0b4ba;
+  --color-text-faint: #7a7d82;
+  --color-primary: #ffffff;
+  --color-primary-active: #e5e5e5;
+  --color-on-primary: #000000;
+  --color-link: #47c2ff;
+  --shadow-soft: 0 4px 12px rgba(0, 0, 0, 0.35);
+}
+
+:root[data-theme="light"] {
+  --color-canvas: #ffffff;
+  --color-canvas-soft: #fafafa;
+  --color-surface: #ffffff;
+  --color-surface-strong: #f0f0f3;
+  --color-border: #dcdee0;
+  --color-border-soft: #f0f0f3;
+  --color-text: #171717;
+  --color-text-muted: #60646c;
+  --color-text-faint: #999999;
+  --color-primary: #000000;
+  --color-primary-active: #1a1a1a;
+  --color-on-primary: #ffffff;
+  --color-link: #0d74ce;
+  --shadow-soft: 0 4px 12px rgba(0, 0, 0, 0.06);
+}
+
+*,
+*::before,
+*::after {
   box-sizing: border-box;
 }
 
@@ -33,35 +108,171 @@ body,
 #root {
   margin: 0;
   height: 100%;
-  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-  background: var(--color-bg);
+  font-family: var(--font-sans);
+  font-size: 14px;
   color: var(--color-text);
+  background: var(--color-canvas);
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  margin: 0 0 var(--space-2);
+}
+
+p {
+  margin: 0 0 var(--space-2);
+  color: var(--color-text-muted);
+}
+
+code,
+.mono {
+  font-family: var(--font-mono);
 }
 
 button {
-  font-family: inherit;
+  font-family: var(--font-sans);
+  font-size: 14px;
+  font-weight: 500;
   cursor: pointer;
+  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+  padding: 8px 14px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  transition: background-color 0.12s ease, border-color 0.12s ease;
+}
+
+button:hover {
+  border-color: var(--color-border);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.btn-primary {
+  background: var(--color-primary);
+  color: var(--color-on-primary);
+  border-color: var(--color-primary);
+}
+
+.btn-primary:hover {
+  background: var(--color-primary-active);
+  border-color: var(--color-primary-active);
+}
+
+.btn-secondary {
+  background: var(--color-surface);
+  color: var(--color-text);
+  border-color: var(--color-border);
+}
+
+.btn-danger {
+  background: transparent;
+  color: var(--color-danger);
+  border-color: var(--color-danger);
+}
+
+.btn-danger:hover {
+  background: var(--color-danger);
+  color: white;
+}
+
+.btn-icon {
+  padding: 4px 8px;
+  border-color: transparent;
+  background: transparent;
 }
 
 input,
 select,
 textarea {
-  font-family: inherit;
+  font-family: var(--font-sans);
+  font-size: 13px;
   background: var(--color-surface);
   color: var(--color-text);
   border: 1px solid var(--color-border);
-  border-radius: 4px;
-  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  width: 100%;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--color-text);
+  border-width: 1.5px;
+}
+
+input[type="checkbox"] {
+  width: auto;
+}
+
+label {
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+.card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-soft);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-soft);
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  background: var(--color-surface-strong);
+  color: var(--color-text);
+  border-radius: var(--radius-pill);
+  padding: 2px 8px;
 }
 
 table {
   border-collapse: collapse;
   width: 100%;
+  font-size: 13px;
 }
 
 th,
 td {
-  border-bottom: 1px solid var(--color-border);
+  border-bottom: 1px solid var(--color-border-soft);
   padding: var(--space-2);
   text-align: left;
+}
+
+th {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-text-faint);
+  font-weight: 600;
+}
+
+a {
+  color: var(--color-link);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: var(--radius-pill);
 }

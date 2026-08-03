@@ -13,17 +13,18 @@ const TAB_LABELS: Record<TabKey, string> = {
 
 export function Tabs({ active, onChange }: TabsProps) {
   return (
-    <div style={{ display: "flex", borderBottom: "1px solid var(--color-border)", background: "var(--color-surface)" }}>
+    <div style={{ display: "flex", gap: 4, padding: "0 12px", borderBottom: "1px solid var(--color-border-soft)", background: "var(--color-canvas)" }}>
       {(Object.keys(TAB_LABELS) as TabKey[]).map((tab) => (
         <button
           key={tab}
           onClick={() => onChange(tab)}
+          className="btn-icon"
           style={{
-            padding: "8px 16px",
-            border: "none",
-            background: "transparent",
-            borderBottom: active === tab ? "2px solid var(--color-accent)" : "2px solid transparent",
-            fontWeight: active === tab ? 600 : 400,
+            padding: "10px 12px",
+            borderRadius: 0,
+            borderBottom: active === tab ? "2px solid var(--color-text)" : "2px solid transparent",
+            color: active === tab ? "var(--color-text)" : "var(--color-text-muted)",
+            fontWeight: active === tab ? 600 : 500,
           }}
         >
           {TAB_LABELS[tab]}

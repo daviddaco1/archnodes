@@ -1,33 +1,44 @@
 .palette {
-  width: 220px;
-  border-right: 1px solid var(--color-border);
-  background: var(--color-surface);
+  width: 232px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--color-border-soft);
+  background: var(--color-canvas-soft);
   overflow-y: auto;
-  padding: var(--space-2);
+  padding: var(--space-3) var(--space-2);
 }
 
 .group {
-  margin-bottom: var(--space-3);
+  margin-bottom: var(--space-4);
 }
 
 .groupTitle {
+  font-family: var(--font-mono);
   font-size: 11px;
+  font-weight: 500;
   text-transform: uppercase;
-  color: var(--color-text-muted);
-  margin: 0 0 6px 2px;
+  letter-spacing: 0.08em;
+  color: var(--color-text-faint);
+  margin: 0 0 var(--space-2) 6px;
 }
 
 .item {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 8px;
+  gap: 8px;
+  padding: 7px 10px;
   margin-bottom: 4px;
-  border-radius: 4px;
-  border: 1px solid var(--color-border);
-  background: var(--color-bg);
-  font-size: 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border-soft);
+  background: var(--color-surface);
+  font-size: 12.5px;
+  color: var(--color-text);
   cursor: grab;
+  transition: box-shadow 0.12s ease, border-color 0.12s ease;
+}
+
+.item:hover {
+  box-shadow: var(--shadow-soft);
+  border-color: var(--color-border);
 }
 
 .item:active {
@@ -35,8 +46,8 @@
 }
 
 .swatch {
-  width: 10px;
-  height: 10px;
-  border-radius: 2px;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-xs);
   flex-shrink: 0;
 }

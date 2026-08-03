@@ -21,7 +21,7 @@ export function NodePalette({ category }: NodePaletteProps) {
         {items.map((schema) => (
           <div key={schema.type} className={styles.item} draggable onDragStart={(e) => onDragStart(e, schema.type)}>
             <span className={styles.swatch} style={{ background: schema.color }} />
-            {schema.type}
+            <span className="mono">{schema.type}</span>
           </div>
         ))}
       </div>
@@ -30,7 +30,7 @@ export function NodePalette({ category }: NodePaletteProps) {
         {structural.map((schema) => (
           <div key={schema.type} className={styles.item} draggable onDragStart={(e) => onDragStart(e, schema.type)}>
             <span className={styles.swatch} style={{ border: "1px dashed var(--color-text-muted)" }} />
-            Contenedor
+            <span className="mono">Contenedor</span>
           </div>
         ))}
       </div>

@@ -1,8 +1,9 @@
 .panel {
-  width: 300px;
-  border-left: 1px solid var(--color-border);
-  background: var(--color-surface);
-  padding: var(--space-3);
+  width: 312px;
+  flex-shrink: 0;
+  border-left: 1px solid var(--color-border-soft);
+  background: var(--color-canvas);
+  padding: var(--space-4) var(--space-3);
   overflow-y: auto;
 }
 
@@ -10,30 +11,51 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.headerTitle {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-text-faint);
 }
 
 .suggestions {
   margin-top: var(--space-3);
-  padding: var(--space-2);
-  border-radius: 6px;
-  background: rgba(47, 133, 90, 0.08);
-  border: 1px solid rgba(47, 133, 90, 0.3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--color-canvas-soft);
+  border: 1px solid var(--color-border-soft);
   font-size: 12px;
+  color: var(--color-text-muted);
 }
 
 .suggestionChip {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  margin: 4px 4px 0 0;
-  padding: 3px 8px;
-  border-radius: 12px;
-  border: 1px solid var(--color-accent);
+  margin: 6px 6px 0 0;
+  padding: 3px 6px 3px 10px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--color-border);
   background: var(--color-surface);
   font-size: 11px;
+  color: var(--color-text);
 }
 
-.danger {
-  color: var(--color-danger);
+.suggestionChip button {
+  padding: 0 4px;
+  border: none;
+  background: transparent;
+  font-weight: 700;
+  color: var(--color-text-muted);
+}
+
+.footer {
+  margin-top: var(--space-4);
+  border-top: 1px solid var(--color-border-soft);
+  padding-top: var(--space-3);
 }
