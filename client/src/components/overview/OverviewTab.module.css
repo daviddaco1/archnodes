@@ -1,0 +1,10 @@
+.wrapper {
+  padding: var(--space-4);
+  overflow: auto;
+  height: 100%;
+}
+
+.filter {
+  margin-bottom: var(--space-3);
+  width: 280px;
+}

@@ -1,0 +1,47 @@
+.node {
+  min-width: 160px;
+  border-radius: 6px;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+  font-size: 12px;
+  overflow: hidden;
+}
+
+.node.selected {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  color: white;
+  font-weight: 600;
+}
+
+.icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.25);
+  font-size: 10px;
+}
+
+.body {
+  padding: 6px 8px;
+  color: var(--color-text);
+}
+
+.summary {
+  color: var(--color-text-muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

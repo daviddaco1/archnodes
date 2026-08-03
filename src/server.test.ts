@@ -1,0 +1,134 @@
+import { randomUUID } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { AddressInfo } from "node:net";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createServer } from "./server.js";
+import { createProjectStore } from "./store/project-store.js";
+import type { Server } from "node:http";
+
+let baseDir: string;
+let server: Server;
+let baseUrl: string;
+
+beforeEach(async () => {
+  baseDir = mkdtempSync(join(tmpdir(), "pv-server-test-"));
+  const store = createProjectStore(`test-${randomUUID()}`, { baseDir });
+  const app = createServer(store);
+  server = app.listen(0);
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const port = (server.address() as AddressInfo).port;
+  baseUrl = `http://localhost:${port}`;
+});
+
+afterEach(async () => {
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  rmSync(baseDir, { recursive: true, force: true });
+});
+
+describe("REST API", () => {
+  it("creates a valid node", async () => {
+    const res = await fetch(`${baseUrl}/api/nodes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "domain", props: { name: "Auth" } }),
+    });
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.id).toBeTruthy();
+  });
+
+  it("rejects a node with an invalid hierarchy", async () => {
+    const domainRes = await fetch(`${baseUrl}/api/nodes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "domain", props: { name: "Auth" } }),
+    });
+    const domain = await domainRes.json();
+
+    const res = await fetch(`${baseUrl}/api/nodes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "service", props: { name: "x" }, parentId: domain.id }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.issues[0].code).toBe("INVALID_HIERARCHY");
+  });
+
+  it("connects and validates edges", async () => {
+    const domain = await (
+      await fetch(`${baseUrl}/api/nodes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "domain", props: { name: "Auth" } }),
+      })
+    ).json();
+    const route = await (
+      await fetch(`${baseUrl}/api/nodes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "route", props: { path: "/login" } }),
+      })
+    ).json();
+
+    const validEdge = await fetch(`${baseUrl}/api/edges`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceId: domain.id, targetId: route.id }),
+    });
+    expect(validEdge.status).toBe(201);
+
+    const invalidEdge = await fetch(`${baseUrl}/api/edges`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceId: route.id, targetId: domain.id }),
+    });
+    expect(invalidEdge.status).toBe(400);
+  });
+
+  it("cascade-deletes descendants", async () => {
+    const domain = await (
+      await fetch(`${baseUrl}/api/nodes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "domain", props: { name: "Auth" } }),
+      })
+    ).json();
+    const route = await (
+      await fetch(`${baseUrl}/api/nodes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "route", props: { path: "/login" }, parentId: domain.id }),
+      })
+    ).json();
+
+    const del = await fetch(`${baseUrl}/api/nodes/${domain.id}?cascade=true`, { method: "DELETE" });
+    expect(del.status).toBe(200);
+
+    const getRoute = await fetch(`${baseUrl}/api/nodes/${route.id}`);
+    expect(getRoute.status).toBe(404);
+  });
+
+  it("returns validation issues", async () => {
+    const res = await fetch(`${baseUrl}/api/validate`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.valid).toBe(true);
+  });
+
+  it("exports markdown", async () => {
+    const res = await fetch(`${baseUrl}/api/export/markdown`);
+    expect(res.headers.get("content-type")).toContain("text/markdown");
+    const text = await res.text();
+    expect(text).toContain("# Project Context:");
+  });
+
+  it("exposes the connection schema", async () => {
+    const res = await fetch(`${baseUrl}/api/schema`);
+    const body = await res.json();
+    expect(Array.isArray(body.connections)).toBe(true);
+    expect(body.connections.length).toBeGreaterThan(0);
+  });
+});

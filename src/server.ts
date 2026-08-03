@@ -1,0 +1,125 @@
+import express, { type Request, type Response, type NextFunction } from "express";
+import { createServer as createHttpServer, type Server } from "node:http";
+import { networkInterfaces } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { existsSync } from "node:fs";
+import type { ProjectStore } from "./store/project-store.js";
+import { ValidationError, HIERARCHY_RULES, REQUIRED_FIELDS, REF_FIELDS, SPECIAL_EDGES } from "./validation/rules.js";
+import type { EdgeType, NodeType } from "./types/graph.js";
+import { exportMarkdown } from "./export/markdown.js";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+function buildSchemaResponse() {
+  const connections: { from: NodeType; to: NodeType; kind: "hierarchy" | "invalidates" }[] = [];
+  for (const [from, targets] of Object.entries(HIERARCHY_RULES) as [NodeType, NodeType[]][]) {
+    for (const to of targets) connections.push({ from, to, kind: "hierarchy" });
+  }
+  for (const from of SPECIAL_EDGES.invalidates.from) {
+    for (const to of SPECIAL_EDGES.invalidates.to) connections.push({ from, to, kind: "invalidates" });
+  }
+  return {
+    connections,
+    nodeTypes: Object.keys(REQUIRED_FIELDS) as NodeType[],
+    requiredFields: REQUIRED_FIELDS,
+    refFields: REF_FIELDS,
+  };
+}
+
+export function createServer(store: ProjectStore): express.Express {
+  const app = express();
+  app.use(express.json());
+
+  app.get("/api/project", (req: Request, res: Response) => {
+    const scope = (req.query.scope as "backend" | "frontend" | "all") ?? "all";
+    res.json(store.getProject(scope));
+  });
+
+  app.get("/api/schema", (_req: Request, res: Response) => {
+    res.json(buildSchemaResponse());
+  });
+
+  app.get("/api/nodes", (req: Request, res: Response) => {
+    const type = req.query.type as NodeType | undefined;
+    res.json(store.listNodes(type));
+  });
+
+  app.get("/api/nodes/:id", (req: Request, res: Response) => {
+    const node = store.getNode(req.params.id);
+    if (!node) return res.status(404).json({ error: "not found" });
+    res.json(node);
+  });
+
+  app.post("/api/nodes", (req: Request, res: Response) => {
+    const { type, props, parentId } = req.body ?? {};
+    const node = store.createNode(type, props, parentId);
+    res.status(201).json(node);
+  });
+
+  app.patch("/api/nodes/:id", (req: Request, res: Response) => {
+    const body = req.body ?? {};
+    let node = store.getNode(req.params.id);
+    if (!node) return res.status(404).json({ error: "not found" });
+    if (body.position !== undefined) node = store.setPosition(req.params.id, body.position);
+    if (body.containerId !== undefined) node = store.setContainer(req.params.id, body.containerId || undefined);
+    if (body.props !== undefined || (body.position === undefined && body.containerId === undefined)) {
+      node = store.updateNode(req.params.id, body.props ?? body);
+    }
+    res.json(node);
+  });
+
+  app.delete("/api/nodes/:id", (req: Request, res: Response) => {
+    const cascade = req.query.cascade === "true";
+    const result = store.deleteNode(req.params.id, cascade);
+    res.json(result);
+  });
+
+  app.post("/api/edges", (req: Request, res: Response) => {
+    const { sourceId, targetId, edgeType } = req.body ?? {};
+    const edge = store.connectNodes(sourceId, targetId, edgeType as EdgeType | undefined);
+    res.status(201).json(edge);
+  });
+
+  app.get("/api/validate", (_req: Request, res: Response) => {
+    res.json(store.validateProject());
+  });
+
+  app.get("/api/export/markdown", (req: Request, res: Response) => {
+    const graph = store.getProject((req.query.scope as "backend" | "frontend" | "all") ?? "all");
+    const domainId = typeof req.query.domainId === "string" ? req.query.domainId : undefined;
+    const markdown = exportMarkdown(graph, store.validateProject(), domainId);
+    res.setHeader("Content-Type", "text/markdown");
+    res.send(markdown);
+  });
+
+  const clientDist = join(__dirname, "..", "client", "dist");
+  if (existsSync(clientDist)) {
+    app.use(express.static(clientDist));
+    app.get("*", (_req: Request, res: Response) => res.sendFile(join(clientDist, "index.html")));
+  }
+
+  app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+    if (err instanceof ValidationError) {
+      return res.status(400).json({ error: err.message, issues: err.issues });
+    }
+    console.error(err);
+    res.status(500).json({ error: "internal error" });
+  });
+
+  return app;
+}
+
+export function startServer(store: ProjectStore, opts: { port: number }): Server {
+  const app = createServer(store);
+  const server = createHttpServer(app);
+  server.listen(opts.port, "0.0.0.0", () => {
+    const nets = networkInterfaces();
+    const lan = Object.values(nets)
+      .flat()
+      .find((net) => net && net.family === "IPv4" && !net.internal)?.address;
+    console.error(`project-visualizer listening on http://localhost:${opts.port}`);
+    if (lan) console.error(`  also available on http://${lan}:${opts.port}`);
+  });
+  return server;
+}

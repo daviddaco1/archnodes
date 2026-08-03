@@ -1,0 +1,74 @@
+- generic [ref=f2e3]:
+  - generic [ref=f2e4]:
+    - strong [ref=f2e5]: browser-demo
+    - button "Validar" [active] [ref=f2e6] [cursor=pointer]
+    - link [ref=f2e7] [cursor=pointer]:
+      - /url: /api/export/markdown
+      - button "Exportar Markdown" [ref=f2e8]
+  - generic [ref=f2e9]:
+    - button "Backend" [ref=f2e10] [cursor=pointer]
+    - button "Frontend" [ref=f2e11] [cursor=pointer]
+    - button "Overview" [ref=f2e12] [cursor=pointer]
+  - generic [ref=f2e13]:
+    - generic [ref=f2e14]:
+      - generic [ref=f2e15]:
+        - paragraph [ref=f2e16]: Backend
+        - generic [ref=f2e17]: domain
+        - generic [ref=f2e19]: subdomain
+        - generic [ref=f2e21]: route
+        - generic [ref=f2e23]: endpoint
+        - generic [ref=f2e25]: middleware
+        - generic [ref=f2e27]: service
+        - generic [ref=f2e29]: model
+        - generic [ref=f2e31]: table
+        - generic [ref=f2e33]: db
+        - generic [ref=f2e35]: orm
+        - generic [ref=f2e37]: repository
+        - generic [ref=f2e39]: tool
+        - generic [ref=f2e41]: queue
+        - generic [ref=f2e43]: externalApi
+        - generic [ref=f2e45]: scheduler
+        - generic [ref=f2e47]: errorHandler
+        - generic [ref=f2e49]: envConfig
+        - generic [ref=f2e51]: websocket
+        - generic [ref=f2e53]: email
+        - generic [ref=f2e55]: redisKey
+      - generic [ref=f2e57]:
+        - paragraph [ref=f2e58]: Estructura
+        - generic [ref=f2e59]: Contenedor
+    - application [ref=f2e63]:
+      - generic [ref=f2e65]:
+        - generic:
+          - generic:
+            - img:
+              - group "Edge from ed44acff-a013-4df8-bc8b-8684aa274f5d to 4d330e7b-6f9b-419a-926e-670e66f9699a" [ref=f2e108] [cursor=pointer]
+          - generic:
+            - group [ref=f2e66]:
+              - generic [ref=f2e67]:
+                - generic [ref=f2e69]:
+                  - generic [ref=f2e70]: D
+                  - generic [ref=f2e71]: domain
+                - generic [ref=f2e72]:
+                  - generic [ref=f2e73]: Auth
+                  - generic [ref=f2e74]: Auth
+            - group [ref=f2e76]:
+              - generic [ref=f2e77]:
+                - generic [ref=f2e79]:
+                  - generic [ref=f2e80]: R
+                  - generic [ref=f2e81]: route
+                - generic [ref=f2e82]:
+                  - generic [ref=f2e83]: route
+                  - generic [ref=f2e84]: /login
+      - generic "Control Panel" [ref=f2e86]:
+        - button "Zoom In" [ref=f2e87] [cursor=pointer]
+        - button "Zoom Out" [ref=f2e90] [cursor=pointer]
+        - button "Fit View" [ref=f2e93] [cursor=pointer]
+        - button "Toggle Interactivity" [ref=f2e96] [cursor=pointer]
+      - img "Mini Map" [ref=f2e100]
+      - link "React Flow attribution" [ref=f2e104] [cursor=pointer]:
+        - /url: https://reactflow.dev?utm_source=attribution
+        - text: React Flow
+    - paragraph [ref=f2e107]: Seleccioná un nodo para ver sus propiedades.
+    - generic [ref=f2e114]:
+      - strong [ref=f2e115]: ✓ Grafo válido
+      - button "×" [ref=f2e116] [cursor=pointer]

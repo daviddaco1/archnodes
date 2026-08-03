@@ -1,0 +1,382 @@
+import type {
+  AnyGraphNode,
+  ApiCallProps,
+  EndpointProps,
+  FormProps,
+  GraphEdge,
+  MiddlewareProps,
+  NavigationRouterProps,
+  PageProps,
+  ProjectGraph,
+  ReturnSpec,
+  RouteProps,
+  ServiceProps,
+} from "../types/graph.js";
+import { validateProjectGraph, type ValidationIssue, type ValidationResult } from "../validation/rules.js";
+
+// ---- YAML (manual emitter, no js-yaml — the input is always our own plain data) ----
+
+function formatScalar(value: unknown): string {
+  if (typeof value === "string") return value;
+  return JSON.stringify(value);
+}
+
+function yamlLines(value: unknown, indent: number): string[] {
+  const pad = "  ".repeat(indent);
+  if (value === null || value === undefined) return [`${pad}null`];
+
+  if (Array.isArray(value)) {
+    if (value.length === 0) return [`${pad}[]`];
+    const lines: string[] = [];
+    for (const item of value) {
+      if (item !== null && typeof item === "object" && !Array.isArray(item)) {
+        Object.entries(item as Record<string, unknown>).forEach(([key, val], i) => {
+          const prefix = i === 0 ? `${pad}- ` : `${pad}  `;
+          if (val !== null && typeof val === "object") {
+            lines.push(`${prefix}${key}:`);
+            lines.push(...yamlLines(val, indent + 2));
+          } else {
+            lines.push(`${prefix}${key}: ${formatScalar(val)}`);
+          }
+        });
+      } else {
+        lines.push(`${pad}- ${formatScalar(item)}`);
+      }
+    }
+    return lines;
+  }
+
+  if (typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>);
+    if (entries.length === 0) return [`${pad}{}`];
+    const lines: string[] = [];
+    for (const [key, val] of entries) {
+      if (val !== null && typeof val === "object") {
+        lines.push(`${pad}${key}:`);
+        lines.push(...yamlLines(val, indent + 1));
+      } else {
+        lines.push(`${pad}${key}: ${formatScalar(val)}`);
+      }
+    }
+    return lines;
+  }
+
+  return [`${pad}${formatScalar(value)}`];
+}
+
+export function toYamlBlock(value: unknown, indent = 0): string {
+  return yamlLines(value, indent).join("\n") + "\n";
+}
+
+function yamlFence(value: unknown): string {
+  const body = toYamlBlock(value).trimEnd();
+  return "```yaml\n" + body + "\n```\n";
+}
+
+// ---- graph traversal helpers ----
+
+function hierarchyChildren(nodeId: string, edges: GraphEdge[], nodesById: Map<string, AnyGraphNode>): AnyGraphNode[] {
+  return edges
+    .filter((e) => e.edgeType === "hierarchy" && e.source === nodeId)
+    .map((e) => nodesById.get(e.target))
+    .filter((n): n is AnyGraphNode => Boolean(n));
+}
+
+function collectDescendants(nodeId: string, edges: GraphEdge[], nodesById: Map<string, AnyGraphNode>): AnyGraphNode[] {
+  const result: AnyGraphNode[] = [];
+  const stack = [...hierarchyChildren(nodeId, edges, nodesById)];
+  while (stack.length > 0) {
+    const node = stack.shift()!;
+    result.push(node);
+    stack.push(...hierarchyChildren(node.id, edges, nodesById));
+  }
+  return result;
+}
+
+function computeFullPath(node: AnyGraphNode, nodesById: Map<string, AnyGraphNode>): string {
+  const segments: string[] = [];
+  let current = node.parentId ? nodesById.get(node.parentId) : undefined;
+  while (current && current.type === "route") {
+    const path = (current.props as RouteProps).path;
+    if (path) segments.unshift(path);
+    current = current.parentId ? nodesById.get(current.parentId) : undefined;
+  }
+  return segments.join("").replace(/\/{2,}/g, "/") || "/";
+}
+
+interface ResolvedChain {
+  middlewares: AnyGraphNode[];
+  service?: AnyGraphNode;
+}
+
+function resolveChain(endpointId: string, edges: GraphEdge[], nodesById: Map<string, AnyGraphNode>): ResolvedChain {
+  const middlewares: AnyGraphNode[] = [];
+  let service: AnyGraphNode | undefined;
+  let currentId = endpointId;
+
+  // safety bound: a real graph can't have more hierarchy hops than total nodes
+  for (let i = 0; i < nodesById.size; i++) {
+    const children = hierarchyChildren(currentId, edges, nodesById);
+    const middleware = children.find((c) => c.type === "middleware");
+    const svc = children.find((c) => c.type === "service");
+    if (middleware) {
+      middlewares.push(middleware);
+      currentId = middleware.id;
+      continue;
+    }
+    if (svc) {
+      service = svc;
+    }
+    break;
+  }
+  return { middlewares, service };
+}
+
+// ---- manifest ----
+
+function renderManifest(graph: ProjectGraph): string {
+  const { manifest, nodes } = graph;
+  const domains = nodes.filter((n) => n.type === "domain").length;
+  const lines = [
+    `# Project Context: ${manifest.projectName}`,
+    "",
+    "## Manifest",
+    `- Language: ${manifest.language ?? "_unset_"}`,
+    `- Framework: ${manifest.framework ?? "_unset_"}`,
+    `- Architecture: ${manifest.architecture ?? "_unset_"}`,
+    `- Databases: ${manifest.databases?.join(", ") || "_unset_"}`,
+    `- Domains: ${domains}`,
+    `- Generated: ${new Date().toISOString()}`,
+    "",
+  ];
+  return lines.join("\n");
+}
+
+// ---- backend: domain -> route -> endpoint ----
+
+function renderReturnsTable(rows: { status: string | number; source: string; description: string }[]): string {
+  if (rows.length === 0) return "";
+  const header = "| Status | Source | Description |\n|---|---|---|\n";
+  const body = rows.map((r) => `| ${r.status} | ${r.source} | ${r.description || "-"} |`).join("\n");
+  return `**Returns (aggregated)**\n\n${header}${body}\n\n`;
+}
+
+function renderEndpoint(node: AnyGraphNode, headerLevel: number, edges: GraphEdge[], nodesById: Map<string, AnyGraphNode>): string {
+  const props = node.props as EndpointProps;
+  const fullPath = computeFullPath(node, nodesById);
+  const hashes = "#".repeat(headerLevel);
+  const parts: string[] = [`${hashes} Endpoint: ${props.method} ${fullPath} (\`${node.id}\`)`, ""];
+
+  if (props.description) parts.push(props.description, "");
+  if (props.input) parts.push("**Input**", "", yamlFence(props.input));
+
+  const { middlewares, service } = resolveChain(node.id, edges, nodesById);
+
+  if (middlewares.length > 0) {
+    parts.push("**Middleware chain**", "");
+    middlewares.forEach((mw, i) => {
+      const mwProps = mw.props as MiddlewareProps;
+      const returns = mwProps.returns?.map((r) => `${r.status}${r.description ? `: ${r.description}` : ""}`).join(", ");
+      parts.push(`${i + 1}. \`${mwProps.name}\`${returns ? ` — returns: ${returns}` : ""}`);
+    });
+    parts.push("");
+  }
+
+  if (service) {
+    const svcProps = service.props as ServiceProps;
+    parts.push("**Service**", "", `- ${svcProps.name}${svcProps.description ? ` — ${svcProps.description}` : ""}`, "");
+  }
+
+  if (props.output) parts.push("**Output**", "", yamlFence(props.output));
+
+  const returnRows: { status: string | number; source: string; description: string }[] = [];
+  for (const r of props.returns ?? []) returnRows.push({ status: r.status, source: "endpoint", description: r.description ?? "" });
+  for (const mw of middlewares) {
+    const mwProps = mw.props as MiddlewareProps;
+    for (const r of mwProps.returns ?? []) returnRows.push({ status: r.status, source: `middleware:${mwProps.name}`, description: r.description ?? "" });
+  }
+  if (service) {
+    const svcProps = service.props as ServiceProps;
+    for (const r of svcProps.errors ?? []) returnRows.push({ status: r.status, source: `service:${svcProps.name}`, description: r.description ?? "" });
+  }
+  parts.push(renderReturnsTable(returnRows));
+
+  if (props.cacheable?.enabled) {
+    parts.push(
+      "**Cache**",
+      "",
+      `- Key pattern: \`${props.cacheable.keyPattern ?? ""}\``,
+      `- TTL: ${props.cacheable.ttl ?? "-"}`,
+      `- Invalidation: ${props.cacheable.invalidation ?? "-"}`,
+      `- Invalidated by: ${props.cacheable.invalidatedBy?.join(", ") || "-"}`,
+      "",
+    );
+  }
+
+  return parts.join("\n") + "\n";
+}
+
+function renderRoute(node: AnyGraphNode, headerLevel: number, edges: GraphEdge[], nodesById: Map<string, AnyGraphNode>): string {
+  const props = node.props as RouteProps;
+  const hashes = "#".repeat(headerLevel);
+  const parts: string[] = [`${hashes} Route: ${props.path ?? ""} (\`${node.id}\`)`, ""];
+  if (props.description) parts.push(props.description, "");
+
+  for (const child of hierarchyChildren(node.id, edges, nodesById)) {
+    if (child.type === "route") parts.push(renderRoute(child, headerLevel + 1, edges, nodesById));
+    if (child.type === "endpoint") parts.push(renderEndpoint(child, headerLevel + 1, edges, nodesById));
+  }
+  return parts.join("\n");
+}
+
+function renderDomain(node: AnyGraphNode, edges: GraphEdge[], nodesById: Map<string, AnyGraphNode>): string {
+  const props = node.props as { name: string; ipPort?: string; description?: string };
+  const parts: string[] = [`### Domain: ${props.name} (\`${node.id}\`)`, ""];
+  if (props.description) parts.push(props.description, "");
+
+  for (const child of hierarchyChildren(node.id, edges, nodesById)) {
+    if (child.type === "subdomain") {
+      const subProps = child.props as { name: string };
+      parts.push(`#### Subdomain: ${subProps.name} (\`${child.id}\`)`, "");
+      for (const grandchild of hierarchyChildren(child.id, edges, nodesById)) {
+        if (grandchild.type === "route") parts.push(renderRoute(grandchild, 5, edges, nodesById));
+      }
+    }
+    if (child.type === "route") parts.push(renderRoute(child, 4, edges, nodesById));
+  }
+  return parts.join("\n");
+}
+
+// ---- backend: floating infra sections ----
+
+function renderList(title: string, items: string[]): string {
+  if (items.length === 0) return "";
+  return `### ${title}\n\n${items.map((i) => `- ${i}`).join("\n")}\n\n`;
+}
+
+function renderInfraSections(nodes: AnyGraphNode[]): string {
+  const models = nodes.filter((n) => n.type === "model").map((n) => `${(n.props as { name: string }).name} (\`${n.id}\`)`);
+  const tables = nodes.filter((n) => n.type === "table").map((n) => `${(n.props as { name: string }).name} (\`${n.id}\`)`);
+  const tools = nodes
+    .filter((n) => n.type === "tool" || n.type === "queue" || n.type === "scheduler" || n.type === "websocket" || n.type === "errorHandler" || n.type === "envConfig")
+    .map((n) => `${n.type}: ${(n.props as { name?: string }).name ?? n.label} (\`${n.id}\`)`);
+  const externalApis = nodes.filter((n) => n.type === "externalApi").map((n) => `${(n.props as { name: string; baseUrl: string }).name} — ${(n.props as { baseUrl: string }).baseUrl} (\`${n.id}\`)`);
+  const emails = nodes.filter((n) => n.type === "email").map((n) => `${(n.props as { trigger: string }).trigger} (\`${n.id}\`)`);
+
+  return [
+    renderList("Models", models),
+    renderList("Tables", tables),
+    renderList("Tools & Infra", tools),
+    renderList("External APIs", externalApis),
+    renderList("Emails", emails),
+  ].join("");
+}
+
+// ---- frontend ----
+
+function renderFrontend(nodes: AnyGraphNode[], edges: GraphEdge[], nodesById: Map<string, AnyGraphNode>): string {
+  const parts: string[] = ["## Frontend", ""];
+
+  const navRouters = nodes.filter((n) => n.type === "navigationRouter");
+  if (navRouters.length > 0) {
+    parts.push("### Navigation", "");
+    for (const nav of navRouters) {
+      const props = nav.props as NavigationRouterProps;
+      parts.push(`- Library: ${props.library}`);
+      for (const route of props.routes ?? []) {
+        const page = nodesById.get(route.pageId);
+        parts.push(`  - ${route.path ?? "/"} → ${page ? (page.props as PageProps).name : route.pageId}`);
+      }
+    }
+    parts.push("");
+  }
+
+  const pages = nodes.filter((n) => n.type === "page");
+  for (const page of pages) {
+    const props = page.props as PageProps;
+    parts.push(`### Page: ${props.name} (\`${page.id}\`)`, "");
+    const descendants = collectDescendants(page.id, edges, nodesById);
+
+    const components = descendants.filter((n) => n.type === "component");
+    if (components.length > 0) {
+      parts.push(
+        "**Components**",
+        "",
+        ...components.map((c) => `- ${(c.props as { name: string }).name} (\`${c.id}\`)`),
+        "",
+      );
+    }
+
+    const apiCalls = descendants.filter((n) => n.type === "apiCall");
+    if (apiCalls.length > 0) {
+      parts.push(
+        "**API Calls**",
+        "",
+        ...apiCalls.map((a) => {
+          const apiProps = a.props as ApiCallProps;
+          return `- ${apiProps.name} → consumes \`${apiProps.endpointRef}\``;
+        }),
+        "",
+      );
+    }
+
+    const forms = descendants.filter((n) => n.type === "form");
+    if (forms.length > 0) {
+      parts.push(
+        "**Forms**",
+        "",
+        ...forms.map((f) => {
+          const formProps = f.props as FormProps;
+          return `- ${formProps.name}${formProps.modelRef ? ` → modelRef \`${formProps.modelRef}\`` : ""}`;
+        }),
+        "",
+      );
+    }
+  }
+
+  const stores = nodes.filter((n) => n.type === "stateStore");
+  if (stores.length > 0) {
+    parts.push("### Stores", "", ...stores.map((s) => `- ${(s.props as { name: string; library: string }).name} (${(s.props as { library: string }).library})`), "");
+  }
+
+  return parts.join("\n");
+}
+
+// ---- validation warnings ----
+
+const CODE_LABELS: Record<ValidationIssue["code"], string> = {
+  BROKEN_REF: "BROKEN REF",
+  MISSING_FIELD: "MISSING FIELD",
+  INVALID_HIERARCHY: "INVALID HIERARCHY",
+  INVALID_REF_TYPE: "INVALID REF TYPE",
+  INVALID_EDGE: "INVALID EDGE",
+};
+
+function renderValidationWarnings(validation: ValidationResult): string {
+  if (validation.issues.length === 0) return "## Validation Warnings\n\n_(none)_\n";
+  const lines = validation.issues.map((issue) => `- [${CODE_LABELS[issue.code]}] ${issue.message}`);
+  return `## Validation Warnings\n\n${lines.join("\n")}\n`;
+}
+
+// ---- entry point ----
+
+export function exportMarkdown(graph: ProjectGraph, validation?: ValidationResult, domainId?: string): string {
+  const nodesById = new Map(graph.nodes.map((n) => [n.id, n]));
+  const resolvedValidation = validation ?? validateProjectGraph(graph);
+
+  const parts: string[] = [renderManifest(graph)];
+
+  const domains = graph.nodes.filter((n) => n.type === "domain" && (!domainId || n.id === domainId));
+  if (domains.length > 0) {
+    parts.push("## Backend", "");
+    for (const domain of domains) parts.push(renderDomain(domain, graph.edges, nodesById));
+    parts.push(renderInfraSections(graph.nodes));
+  }
+
+  const hasFrontend = graph.nodes.some((n) => n.type === "page" || n.type === "navigationRouter" || n.type === "stateStore");
+  if (hasFrontend) parts.push(renderFrontend(graph.nodes, graph.edges, nodesById));
+
+  parts.push(renderValidationWarnings(resolvedValidation));
+
+  return parts.join("\n");
+}

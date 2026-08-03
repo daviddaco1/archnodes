@@ -1,0 +1,39 @@
+.panel {
+  width: 300px;
+  border-left: 1px solid var(--color-border);
+  background: var(--color-surface);
+  padding: var(--space-3);
+  overflow-y: auto;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: var(--space-3);
+}
+
+.suggestions {
+  margin-top: var(--space-3);
+  padding: var(--space-2);
+  border-radius: 6px;
+  background: rgba(47, 133, 90, 0.08);
+  border: 1px solid rgba(47, 133, 90, 0.3);
+  font-size: 12px;
+}
+
+.suggestionChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 4px 4px 0 0;
+  padding: 3px 8px;
+  border-radius: 12px;
+  border: 1px solid var(--color-accent);
+  background: var(--color-surface);
+  font-size: 11px;
+}
+
+.danger {
+  color: var(--color-danger);
+}

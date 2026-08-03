@@ -1,0 +1,29 @@
+- generic [ref=f2e3]:
+  - generic [ref=f2e4]:
+    - strong [ref=f2e5]: browser-demo
+    - button "Validar" [ref=f2e6] [cursor=pointer]
+    - link [ref=f2e7] [cursor=pointer]:
+      - /url: /api/export/markdown
+      - button "Exportar Markdown" [ref=f2e8]
+  - generic [ref=f2e9]:
+    - button "Backend" [ref=f2e10] [cursor=pointer]
+    - button "Frontend" [ref=f2e11] [cursor=pointer]
+    - button "Overview" [active] [ref=f2e12] [cursor=pointer]
+  - generic [ref=f2e13]:
+    - generic [ref=f2e141]:
+      - heading "Referencias cruzadas Frontend → Backend" [level=3] [ref=f2e142]
+      - textbox "Filtrar..." [ref=f2e143]
+      - table [ref=f2e144]:
+        - rowgroup [ref=f2e145]:
+          - row [ref=f2e146]:
+            - columnheader "Nodo Frontend" [ref=f2e147]
+            - columnheader "Tipo" [ref=f2e148]
+            - columnheader "Campo" [ref=f2e149]
+            - columnheader [ref=f2e150]
+            - columnheader "Nodo Backend" [ref=f2e151]
+        - rowgroup [ref=f2e152]:
+          - row [ref=f2e153]:
+            - cell "Sin referencias cruzadas todavía." [ref=f2e154]
+    - generic [ref=f2e114]:
+      - strong [ref=f2e115]: ✓ Grafo válido
+      - button "×" [ref=f2e116] [cursor=pointer]
