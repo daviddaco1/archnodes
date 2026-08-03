@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ReactFlowProvider } from "@xyflow/react";
 import { GraphProvider, useGraph } from "./context/GraphContext";
 import { Tabs, type TabKey } from "./components/layout/Tabs";
@@ -8,12 +8,23 @@ import { GraphCanvas } from "./components/canvas/GraphCanvas";
 import { PropertyPanel } from "./components/properties/PropertyPanel";
 import { OverviewTab } from "./components/overview/OverviewTab";
 import { ValidationPanel } from "./components/validation/ValidationPanel";
+import { SetupWizardModal } from "./components/setup/SetupWizardModal";
 import type { ValidationResult } from "./api/client";
 
 function AppShell() {
-  const { loading, error } = useGraph();
+  const { loading, error, nodes, manifest, refetch } = useGraph();
   const [tab, setTab] = useState<TabKey>("backend");
   const [validation, setValidation] = useState<ValidationResult | null>(null);
+  const [setupOpen, setSetupOpen] = useState(false);
+  const autoShown = useRef(false);
+
+  useEffect(() => {
+    if (loading || autoShown.current) return;
+    if (nodes.length === 0 && !manifest?.language) {
+      setSetupOpen(true);
+      autoShown.current = true;
+    }
+  }, [loading, nodes.length, manifest?.language]);
 
   if (loading)
     return (
@@ -26,7 +37,7 @@ function AppShell() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh" }}>
-      <Toolbar onValidated={setValidation} />
+      <Toolbar onValidated={setValidation} onOpenSetup={() => setSetupOpen(true)} />
       <Tabs active={tab} onChange={setTab} />
       <div style={{ position: "relative", flex: 1, display: "flex", minHeight: 0 }}>
         {tab === "overview" ? (
@@ -42,6 +53,15 @@ function AppShell() {
         )}
         <ValidationPanel result={validation} onClose={() => setValidation(null)} />
       </div>
+      {setupOpen && (
+        <SetupWizardModal
+          onClose={() => setSetupOpen(false)}
+          onApplied={() => {
+            setSetupOpen(false);
+            void refetch();
+          }}
+        />
+      )}
     </div>
   );
 }

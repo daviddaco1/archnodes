@@ -8,6 +8,9 @@ import type { ProjectStore } from "./store/project-store.js";
 import { ValidationError, HIERARCHY_RULES, REQUIRED_FIELDS, REF_FIELDS, SPECIAL_EDGES } from "./validation/rules.js";
 import type { EdgeType, NodeType } from "./types/graph.js";
 import { exportMarkdown } from "./export/markdown.js";
+import { TEMPLATES, applyTemplate } from "./init/templates.js";
+import { FRAMEWORKS_BY_LANGUAGE, suggestFrameworks, suggestStack } from "./init/suggestions.js";
+import { applyWizardAnswers, type WizardAnswers } from "./init/wizard.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -91,6 +94,47 @@ export function createServer(store: ProjectStore): express.Express {
     const markdown = exportMarkdown(graph, store.validateProject(), domainId);
     res.setHeader("Content-Type", "text/markdown");
     res.send(markdown);
+  });
+
+  app.get("/api/templates", (_req: Request, res: Response) => {
+    res.json(TEMPLATES);
+  });
+
+  app.post("/api/templates/apply", (req: Request, res: Response) => {
+    const { templateId } = req.body ?? {};
+    try {
+      applyTemplate(store, templateId);
+    } catch (err) {
+      return res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+    res.json(store.getProject("all"));
+  });
+
+  app.get("/api/suggestions/languages", (_req: Request, res: Response) => {
+    res.json({ languages: Object.keys(FRAMEWORKS_BY_LANGUAGE) });
+  });
+
+  app.get("/api/suggestions/frameworks", (req: Request, res: Response) => {
+    const language = typeof req.query.language === "string" ? req.query.language : "";
+    res.json({ frameworks: suggestFrameworks(language) });
+  });
+
+  app.get("/api/suggestions/stack", (req: Request, res: Response) => {
+    const framework = typeof req.query.framework === "string" ? req.query.framework : "";
+    res.json(suggestStack(framework) ?? {});
+  });
+
+  app.post("/api/wizard/apply", (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as Partial<WizardAnswers>;
+    const answers: WizardAnswers = {
+      language: body.language ?? "",
+      framework: body.framework ?? "",
+      database: body.database ?? "",
+      architecture: body.architecture === "microservices" ? "microservices" : "monolith",
+      domains: Array.isArray(body.domains) ? body.domains : [],
+    };
+    applyWizardAnswers(store, answers);
+    res.json(store.getProject("all"));
   });
 
   const clientDist = join(__dirname, "..", "client", "dist");

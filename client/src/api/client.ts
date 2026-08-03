@@ -86,3 +86,47 @@ export function validateProject(): Promise<ValidationResult> {
 export function exportMarkdownUrl(): string {
   return `/api/export/markdown`;
 }
+
+export interface Template {
+  id: string;
+  label: string;
+  description: string;
+  language: string;
+  framework: string;
+  database: string;
+  orm?: string;
+  frontendFramework?: string;
+  architecture: "monolith" | "microservices";
+}
+
+export function getTemplates(): Promise<Template[]> {
+  return request(`/api/templates`);
+}
+
+export function applyTemplate(templateId: string): Promise<ProjectGraph> {
+  return request(`/api/templates/apply`, { method: "POST", body: JSON.stringify({ templateId }) });
+}
+
+export function getSuggestedLanguages(): Promise<{ languages: string[] }> {
+  return request(`/api/suggestions/languages`);
+}
+
+export function getSuggestedFrameworks(language: string): Promise<{ frameworks: string[] }> {
+  return request(`/api/suggestions/frameworks?language=${encodeURIComponent(language)}`);
+}
+
+export function getSuggestedStack(framework: string): Promise<{ orm?: string; database?: string }> {
+  return request(`/api/suggestions/stack?framework=${encodeURIComponent(framework)}`);
+}
+
+export interface WizardAnswers {
+  language: string;
+  framework: string;
+  database: string;
+  architecture: "monolith" | "microservices";
+  domains: string[];
+}
+
+export function applyWizard(answers: WizardAnswers): Promise<ProjectGraph> {
+  return request(`/api/wizard/apply`, { method: "POST", body: JSON.stringify(answers) });
+}

@@ -4,9 +4,10 @@ import type { ValidationResult } from "../../api/client";
 
 interface ToolbarProps {
   onValidated: (result: ValidationResult) => void;
+  onOpenSetup: () => void;
 }
 
-export function Toolbar({ onValidated }: ToolbarProps) {
+export function Toolbar({ onValidated, onOpenSetup }: ToolbarProps) {
   const { manifest } = useGraph();
 
   const handleValidate = async () => {
@@ -29,6 +30,9 @@ export function Toolbar({ onValidated }: ToolbarProps) {
       <strong style={{ fontSize: 14, letterSpacing: "-0.01em" }}>{manifest?.projectName ?? "project-visualizer"}</strong>
       {manifest?.framework && <span className="badge">{manifest.framework}</span>}
       <div style={{ flex: 1 }} />
+      <button className="btn-secondary" onClick={onOpenSetup}>
+        Setup
+      </button>
       <button className="btn-secondary" onClick={() => void handleValidate()}>
         Validar
       </button>

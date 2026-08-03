@@ -131,4 +131,48 @@ describe("REST API", () => {
     expect(Array.isArray(body.connections)).toBe(true);
     expect(body.connections.length).toBeGreaterThan(0);
   });
+
+  it("lists templates and applies one", async () => {
+    const list = await fetch(`${baseUrl}/api/templates`);
+    const templates = await list.json();
+    expect(templates.length).toBeGreaterThan(0);
+
+    const apply = await fetch(`${baseUrl}/api/templates/apply`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ templateId: templates[0].id }),
+    });
+    expect(apply.status).toBe(200);
+    const graph = await apply.json();
+    expect(graph.manifest.framework).toBe(templates[0].framework);
+  });
+
+  it("rejects an unknown template id", async () => {
+    const res = await fetch(`${baseUrl}/api/templates/apply`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ templateId: "does-not-exist" }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("returns suggested frameworks and stack", async () => {
+    const frameworks = await (await fetch(`${baseUrl}/api/suggestions/frameworks?language=TypeScript`)).json();
+    expect(frameworks.frameworks).toContain("Express");
+
+    const stack = await (await fetch(`${baseUrl}/api/suggestions/stack?framework=NestJS`)).json();
+    expect(stack).toEqual({ orm: "TypeORM", database: "PostgreSQL" });
+  });
+
+  it("applies wizard answers", async () => {
+    const res = await fetch(`${baseUrl}/api/wizard/apply`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ language: "TypeScript", framework: "Express", database: "PostgreSQL", architecture: "monolith", domains: ["Auth"] }),
+    });
+    expect(res.status).toBe(200);
+    const graph = await res.json();
+    expect(graph.manifest.framework).toBe("Express");
+    expect(graph.nodes.some((n: { type: string }) => n.type === "domain")).toBe(true);
+  });
 });

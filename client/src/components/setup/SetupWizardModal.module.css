@@ -1,0 +1,91 @@
+.backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+
+.modal {
+  width: 640px;
+  max-height: 80vh;
+  overflow-y: auto;
+  padding: var(--space-4);
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: var(--space-3);
+}
+
+.modeSwitch {
+  display: flex;
+  gap: 8px;
+  margin-bottom: var(--space-4);
+}
+
+.modeBtn {
+  flex: 1;
+}
+
+.modeBtn.active {
+  background: var(--color-primary);
+  color: var(--color-on-primary);
+  border-color: var(--color-primary);
+}
+
+.templateGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.templateCard {
+  border: 1px solid var(--color-border-soft);
+  border-radius: var(--radius-lg);
+  padding: 14px;
+  cursor: pointer;
+  transition: box-shadow 0.12s ease, border-color 0.12s ease;
+}
+
+.templateCard:hover {
+  box-shadow: var(--shadow-soft);
+  border-color: var(--color-border);
+}
+
+.templateLabel {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.templateDescription {
+  font-size: 12px;
+  color: var(--color-text-muted);
+  margin-bottom: 8px;
+}
+
+.templateBadges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.formGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.fieldFull {
+  grid-column: 1 / -1;
+}
+
+.skip {
+  text-align: center;
+  margin-top: var(--space-3);
+}
