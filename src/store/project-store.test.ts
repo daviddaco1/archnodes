@@ -463,6 +463,12 @@ describe("applyBatch", () => {
   });
 });
 
+describe("project name validation", () => {
+  it("rejects a path-traversal project name before touching the filesystem", () => {
+    expect(() => createProjectStore("../../etc/passwd", { baseDir })).toThrow(/Invalid project name/);
+  });
+});
+
 describe("PersistenceAdapter injection", () => {
   it("works entirely against an in-memory fake adapter — the store makes no filesystem assumptions", () => {
     let saved: unknown = null;
@@ -522,6 +528,25 @@ describe("recordSync / getSyncStatus / getBulkSyncStatus", () => {
     const statuses = store.getBulkSyncStatus({ [a.id]: "hashA", [b.id]: "hashB" });
     expect(statuses[a.id]).toBe("in_sync");
     expect(statuses[b.id]).toBe("unknown"); // b was never synced
+  });
+});
+
+describe("recordAudit / listAuditLog", () => {
+  it("appends and lists entries independent of history", () => {
+    const before = store.listHistory().length;
+    store.recordAudit({ transport: "http", operation: "GET /api/project", result: "SUCCESS" });
+    expect(store.listHistory().length).toBe(before); // audit log is separate from the graph history
+    const log = store.listAuditLog();
+    expect(log).toHaveLength(1);
+    expect(log[0].operation).toBe("GET /api/project");
+    expect(log[0].id).toBeTruthy();
+    expect(log[0].timestamp).toBeTruthy();
+  });
+
+  it("supports limit/before filtering", () => {
+    store.recordAudit({ transport: "mcp", operation: "create_node", result: "SUCCESS" });
+    store.recordAudit({ transport: "mcp", operation: "delete_node", result: "FAILURE", errorMessage: "not found" });
+    expect(store.listAuditLog({ limit: 1 })[0].operation).toBe("delete_node");
   });
 });
 

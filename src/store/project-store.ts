@@ -38,6 +38,9 @@ import {
   projectPath,
   type PersistenceAdapter,
 } from "./persistence-adapter.js";
+import { assertValidProjectName } from "../security/project-name.js";
+import type { Role } from "../security/permissions.js";
+import { appendAuditEntry, filterAuditLog, readAuditLog, type AuditEntry } from "../audit/audit-log.js";
 
 const BACKEND_SET = new Set<NodeType>(BACKEND_NODE_TYPES);
 const FRONTEND_SET = new Set<NodeType>(FRONTEND_NODE_TYPES);
@@ -60,6 +63,7 @@ export interface DeleteResult {
 export interface TransactionMeta {
   source?: HistorySource;
   author?: string;
+  role?: Role;
   description?: string;
   operation?: string;
 }
@@ -99,8 +103,11 @@ export interface ProjectStore {
   compareVersions(entryIdA: string, entryIdB: string): { nodesDiff: HistoryEntry["nodesDiff"]; edgesDiff: HistoryEntry["edgesDiff"] };
   /** Stamps a node with the source file hash an agent just synced against — never bumps updatedAt. */
   recordSync(id: string, patch: { sourceHash?: string; sourcePath?: string }, meta?: TransactionMeta): AnyGraphNode;
-  getSyncStatus(id: string, currentHash?: string): SyncStatus;
-  getBulkSyncStatus(hashes: Record<string, string>): Record<string, SyncStatus>;
+  getSyncStatus(id: string, currentHash?: string | null): SyncStatus;
+  getBulkSyncStatus(hashes: Record<string, string | null>): Record<string, SyncStatus>;
+  /** Append-only, never replayed — see src/audit/audit-log.ts for why this is separate from history. */
+  recordAudit(entry: Omit<AuditEntry, "id" | "timestamp">): AuditEntry;
+  listAuditLog(opts?: { limit?: number; before?: string }): AuditEntry[];
 }
 
 // Whitelisted so a batch can only ever invoke one of the store's own known mutators — never an
@@ -138,6 +145,9 @@ function now(): string {
 }
 
 export function createProjectStore(projectName: string, opts: ProjectStoreOptions = {}): ProjectStore {
+  // Single real entry point for REST, MCP, and the CLI's init/wizard/template paths alike — this
+  // is the one guard against `--project ../../whatever` style path traversal.
+  assertValidProjectName(projectName);
   const adapter = opts.persistence ?? createJsonFileAdapter(projectName, opts.baseDir);
   adapter.acquireLock();
   let graph = adapter.load();
@@ -145,6 +155,9 @@ export function createProjectStore(projectName: string, opts: ProjectStoreOption
   // History lives alongside the graph file regardless of which PersistenceAdapter backs the graph
   // itself — it's an audit log, not "the project's data", so it isn't part of that abstraction.
   const historyPath = join(dirname(projectPath(projectName, opts.baseDir)), ".history", "history.jsonl");
+  // Separate file/folder from history — see audit-log.ts for why. Not read into memory eagerly
+  // (unlike history, nothing here needs an in-memory replay cursor).
+  const auditPath = join(dirname(projectPath(projectName, opts.baseDir)), ".audit", "audit.jsonl");
   let historyEntries = readHistory(historyPath);
   // How many entries are currently "applied" — undo() decrements, redo() increments. A fresh
   // commit while this is behind historyEntries.length drops the redo-able future (linear history,
@@ -528,16 +541,26 @@ export function createProjectStore(projectName: string, opts: ProjectStoreOption
       }, { ...meta, operation: "recordSync" });
     },
 
-    getSyncStatus(id: string, currentHash?: string) {
+    getSyncStatus(id: string, currentHash?: string | null) {
       return determineSyncStatus(requireNode(id), currentHash);
     },
 
-    getBulkSyncStatus(hashes: Record<string, string>) {
+    getBulkSyncStatus(hashes: Record<string, string | null>) {
       const result: Record<string, SyncStatus> = {};
       for (const node of graph.nodes) {
         result[node.id] = determineSyncStatus(node, hashes[node.id]);
       }
       return result;
+    },
+
+    recordAudit(entry: Omit<AuditEntry, "id" | "timestamp">) {
+      const full: AuditEntry = { id: randomUUID(), timestamp: now(), ...entry };
+      appendAuditEntry(auditPath, full);
+      return full;
+    },
+
+    listAuditLog(opts?: { limit?: number; before?: string }) {
+      return filterAuditLog(readAuditLog(auditPath), opts);
     },
 
     transaction<T>(fn: (tx: ProjectStore) => T, meta?: TransactionMeta): T {
@@ -633,6 +656,7 @@ export function createProjectStore(projectName: string, opts: ProjectStoreOption
       operation: meta?.operation ?? "transaction",
       source: meta?.source ?? "system",
       author: meta?.author,
+      role: meta?.role,
       description: meta?.description,
       nodesDiff,
       edgesDiff,

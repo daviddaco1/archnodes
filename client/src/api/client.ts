@@ -94,6 +94,39 @@ export function validateProject(): Promise<ValidationResult> {
   return request(`/api/validate`);
 }
 
+export type RelationKind = "hierarchy-parent" | "hierarchy-child" | "ref" | "invalidates-out" | "invalidates-in";
+export interface RelatedNode {
+  nodeId: string;
+  kind: RelationKind;
+  field?: string;
+}
+export interface AffectedNode {
+  nodeId: string;
+  depth: number;
+  via: RelationKind;
+}
+
+export function getNodeDependencies(id: string): Promise<RelatedNode[]> {
+  return request(`/api/nodes/${id}/dependencies`);
+}
+
+export function getNodeDependents(id: string): Promise<RelatedNode[]> {
+  return request(`/api/nodes/${id}/dependents`);
+}
+
+export function getNodeAffected(id: string): Promise<AffectedNode[]> {
+  return request(`/api/nodes/${id}/affected`);
+}
+
+// One request for a whole batch of position writes (e.g. after auto-layout) instead of one PATCH
+// per node — see POST /api/batch on the server.
+export function batchUpdatePositions(positions: { id: string; x: number; y: number }[]): Promise<unknown[]> {
+  return request<{ results: unknown[] }>(`/api/batch`, {
+    method: "POST",
+    body: JSON.stringify({ operations: positions.map((p) => ({ method: "setPosition", args: [p.id, { x: p.x, y: p.y }] })) }),
+  }).then((r) => r.results);
+}
+
 export function exportMarkdownUrl(): string {
   return `/api/export/markdown`;
 }

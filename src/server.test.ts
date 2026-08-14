@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createServer } from "./server.js";
+import { createServer, startServer } from "./server.js";
 import { createProjectStore } from "./store/project-store.js";
 import type { Server } from "node:http";
 
@@ -295,6 +295,70 @@ describe("REST API", () => {
     expect(project.nodes.find((n: { id: string }) => n.id === domain.id).props.name).toBe("Auth2");
   });
 
+  it("detect-conflicts buckets nodes by sync status", async () => {
+    const domain = await fetch(`${baseUrl}/api/nodes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "domain", props: { name: "Auth" } }),
+    }).then((r) => r.json());
+    await fetch(`${baseUrl}/api/nodes/${domain.id}/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceHash: "abc", sourcePath: "src/domains/auth.ts" }),
+    });
+
+    const res = await fetch(`${baseUrl}/api/detect-conflicts`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ hashes: { [domain.id]: null } }),
+    });
+    expect(res.status).toBe(200);
+    const report = await res.json();
+    expect(report.codeDeleted.map((b: { nodeId: string }) => b.nodeId)).toEqual([domain.id]);
+  });
+
+  it("sync-status query param accepts the literal 'null' sentinel", async () => {
+    const domain = await fetch(`${baseUrl}/api/nodes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "domain", props: { name: "Auth" } }),
+    }).then((r) => r.json());
+    await fetch(`${baseUrl}/api/nodes/${domain.id}/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceHash: "abc", sourcePath: "src/domains/auth.ts" }),
+    });
+    const status = await fetch(`${baseUrl}/api/nodes/${domain.id}/sync-status?hash=null`).then((r) => r.json());
+    expect(status.status).toBe("code_deleted");
+  });
+
+  it("import-project matches existing nodes by sourcePath instead of duplicating", async () => {
+    const domain = await fetch(`${baseUrl}/api/nodes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "domain", props: { name: "Auth" } }),
+    }).then((r) => r.json());
+    await fetch(`${baseUrl}/api/nodes/${domain.id}/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourcePath: "src/domains/auth.ts" }),
+    });
+
+    const res = await fetch(`${baseUrl}/api/import-project`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        nodes: [{ tempId: "d1", type: "domain", props: { name: "AuthRenamed" }, sourcePath: "src/domains/auth.ts" }],
+        edges: [],
+      }),
+    });
+    expect(res.status).toBe(200);
+    const result = await res.json();
+    expect(result.created).toHaveLength(0);
+    expect(result.updated).toEqual([{ tempId: "d1", id: domain.id }]);
+    expect((await fetch(`${baseUrl}/api/project`).then((r) => r.json())).nodes).toHaveLength(1);
+  });
+
   it("rejects an import with an invalid mode", async () => {
     const res = await fetch(`${baseUrl}/api/import`, {
       method: "POST",
@@ -407,6 +471,36 @@ describe("REST API", () => {
     expect((await fetch(`${baseUrl}/api/analyze-change`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ nodeId: "does-not-exist", changeType: "delete" }) })).status).toBe(404);
   });
 
+  it("exposes bounded project context for a node", async () => {
+    const domain = await fetch(`${baseUrl}/api/nodes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "domain", props: { name: "Auth" } }),
+    }).then((r) => r.json());
+    const route = await fetch(`${baseUrl}/api/nodes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "route", props: { path: "/login" }, parentId: domain.id }),
+    }).then((r) => r.json());
+
+    const ctx = await fetch(`${baseUrl}/api/nodes/${route.id}/context`).then((r) => r.json());
+    expect(ctx.focus.id).toBe(route.id);
+    expect(ctx.related.some((r: { nodeId: string }) => r.nodeId === domain.id)).toBe(true);
+    expect((await fetch(`${baseUrl}/api/nodes/does-not-exist/context`)).status).toBe(404);
+  });
+
+  it("exposes analyze/search", async () => {
+    await fetch(`${baseUrl}/api/nodes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "domain", props: { name: "Auth" } }),
+    });
+    const summary = await fetch(`${baseUrl}/api/analyze`).then((r) => r.json());
+    expect(summary.totalNodes).toBe(1);
+    const results = await fetch(`${baseUrl}/api/search?q=auth`).then((r) => r.json());
+    expect(results.some((r: { label: string }) => r.label === "Auth")).toBe(true);
+  });
+
   it("exposes conflict detection via record_sync / sync-status", async () => {
     const domain = await fetch(`${baseUrl}/api/nodes`, {
       method: "POST",
@@ -476,5 +570,174 @@ describe("REST API", () => {
     expect(affected).toContainEqual({ nodeId: route.id, depth: 1, via: "hierarchy-child" });
 
     expect((await fetch(`${baseUrl}/api/nodes/does-not-exist/dependencies`)).status).toBe(404);
+  });
+});
+
+describe("authenticated mode", () => {
+  let authServer: Server;
+  let authBaseUrl: string;
+
+  beforeEach(async () => {
+    const store = createProjectStore(`test-${randomUUID()}`, { baseDir: mkdtempSync(join(tmpdir(), "pv-server-auth-test-")) });
+    const app = createServer(store, { authToken: "secret" });
+    authServer = app.listen(0);
+    await new Promise<void>((resolve) => authServer.once("listening", resolve));
+    authBaseUrl = `http://localhost:${(authServer.address() as AddressInfo).port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>((resolve) => authServer.close(() => resolve()));
+  });
+
+  it("rejects requests with no Authorization header", async () => {
+    expect((await fetch(`${authBaseUrl}/api/project`)).status).toBe(401);
+  });
+
+  it("rejects requests with the wrong token", async () => {
+    const res = await fetch(`${authBaseUrl}/api/project`, { headers: { Authorization: "Bearer wrong" } });
+    expect(res.status).toBe(401);
+  });
+
+  it("allows requests with the correct bearer token", async () => {
+    const res = await fetch(`${authBaseUrl}/api/project`, { headers: { Authorization: "Bearer secret" } });
+    expect(res.status).toBe(200);
+  });
+});
+
+describe("role-based authorization", () => {
+  async function serverWithRole(role: "owner" | "admin" | "editor" | "viewer" | "agent") {
+    const store = createProjectStore(`test-${randomUUID()}`, { baseDir: mkdtempSync(join(tmpdir(), "pv-server-role-test-")) });
+    const app = createServer(store, { authToken: "secret", role });
+    const s = app.listen(0);
+    await new Promise<void>((resolve) => s.once("listening", resolve));
+    return { server: s, url: `http://localhost:${(s.address() as AddressInfo).port}` };
+  }
+
+  it("a viewer can read but not write", async () => {
+    const { server: s, url } = await serverWithRole("viewer");
+    try {
+      const getRes = await fetch(`${url}/api/project`, { headers: { Authorization: "Bearer secret" } });
+      expect(getRes.status).toBe(200);
+      const postRes = await fetch(`${url}/api/nodes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer secret" },
+        body: JSON.stringify({ type: "domain", props: { name: "Auth" } }),
+      });
+      expect(postRes.status).toBe(403);
+    } finally {
+      await new Promise<void>((resolve) => s.close(() => resolve()));
+    }
+  });
+
+  it("an editor can write", async () => {
+    const { server: s, url } = await serverWithRole("editor");
+    try {
+      const postRes = await fetch(`${url}/api/nodes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer secret" },
+        body: JSON.stringify({ type: "domain", props: { name: "Auth" } }),
+      });
+      expect(postRes.status).toBe(201);
+    } finally {
+      await new Promise<void>((resolve) => s.close(() => resolve()));
+    }
+  });
+
+  it("defaults to owner (full access) when no role is specified but auth is enabled", async () => {
+    const store = createProjectStore(`test-${randomUUID()}`, { baseDir: mkdtempSync(join(tmpdir(), "pv-server-role-test-")) });
+    const app = createServer(store, { authToken: "secret" });
+    const s = app.listen(0);
+    await new Promise<void>((resolve) => s.once("listening", resolve));
+    try {
+      const url = `http://localhost:${(s.address() as AddressInfo).port}`;
+      const postRes = await fetch(`${url}/api/nodes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer secret" },
+        body: JSON.stringify({ type: "domain", props: { name: "Auth" } }),
+      });
+      expect(postRes.status).toBe(201);
+    } finally {
+      await new Promise<void>((resolve) => s.close(() => resolve()));
+    }
+  });
+
+  it("local mode (no auth configured) keeps full write access regardless of role option", async () => {
+    const store = createProjectStore(`test-${randomUUID()}`, { baseDir: mkdtempSync(join(tmpdir(), "pv-server-role-test-")) });
+    const app = createServer(store, { role: "viewer" }); // no authToken -> local mode, role ignored
+    const s = app.listen(0);
+    await new Promise<void>((resolve) => s.once("listening", resolve));
+    try {
+      const url = `http://localhost:${(s.address() as AddressInfo).port}`;
+      const postRes = await fetch(`${url}/api/nodes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "domain", props: { name: "Auth" } }),
+      });
+      expect(postRes.status).toBe(201);
+    } finally {
+      await new Promise<void>((resolve) => s.close(() => resolve()));
+    }
+  });
+});
+
+describe("audit log", () => {
+  it("logs every request (reads included), queryable via GET /api/audit-log", async () => {
+    const created = await fetch(`${baseUrl}/api/nodes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "domain", props: { name: "Auth" } }),
+    }).then((r) => r.json());
+
+    const log = await fetch(`${baseUrl}/api/audit-log`).then((r) => r.json());
+    const createEntry = log.find((e: { operation: string }) => e.operation.includes("/api/nodes") && e.operation.startsWith("POST"));
+    expect(createEntry).toBeTruthy();
+    expect(createEntry.result).toBe("SUCCESS");
+    expect(createEntry.target?.nodeId).toBeUndefined(); // POST has no :id param
+
+    await fetch(`${baseUrl}/api/nodes/${created.id}`); // a read with an :id param
+    const log2 = await fetch(`${baseUrl}/api/audit-log`).then((r) => r.json());
+    const readEntry = log2.find((e: { operation: string }) => e.operation === "GET /api/nodes/:id");
+    expect(readEntry?.target).toEqual({ nodeId: created.id, nodeType: "domain" });
+  });
+
+  it("logs a failed request as FAILURE", async () => {
+    await fetch(`${baseUrl}/api/nodes/does-not-exist`);
+    const log = await fetch(`${baseUrl}/api/audit-log`).then((r) => r.json());
+    const failed = log.find((e: { operation: string; result: string }) => e.operation === "GET /api/nodes/:id" && e.result === "FAILURE");
+    expect(failed).toBeTruthy();
+  });
+});
+
+describe("request body size limit", () => {
+  it("accepts a payload larger than body-parser's 100kb default", async () => {
+    // A single node with a large-but-legitimate props blob — well under the 5mb limit, well over 100kb.
+    const bigDescription = "x".repeat(150_000);
+    const res = await fetch(`${baseUrl}/api/nodes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "domain", props: { name: "Auth", description: bigDescription } }),
+    });
+    expect(res.status).toBe(201);
+  });
+});
+
+describe("startServer LAN bind guard", () => {
+  it("throws when binding beyond loopback without a token or --allow-insecure-lan", () => {
+    const store = createProjectStore(`test-${randomUUID()}`, { baseDir: mkdtempSync(join(tmpdir(), "pv-server-bind-test-")) });
+    expect(() => startServer(store, { port: 0, host: "0.0.0.0" })).toThrow(/Refusing to bind/);
+  });
+
+  it("allows binding beyond loopback when a token is provided", async () => {
+    const store = createProjectStore(`test-${randomUUID()}`, { baseDir: mkdtempSync(join(tmpdir(), "pv-server-bind-test-")) });
+    const server = startServer(store, { port: 0, host: "0.0.0.0", authToken: "secret" });
+    await new Promise<void>((resolve) => server.once("listening", resolve));
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  it("allows binding beyond loopback with --allow-insecure-lan even without a token", async () => {
+    const store = createProjectStore(`test-${randomUUID()}`, { baseDir: mkdtempSync(join(tmpdir(), "pv-server-bind-test-")) });
+    const server = startServer(store, { port: 0, host: "0.0.0.0", allowInsecureLan: true });
+    await new Promise<void>((resolve) => server.once("listening", resolve));
+    await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 });

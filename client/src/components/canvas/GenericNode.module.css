@@ -29,6 +29,23 @@
   opacity: 0.45;
 }
 
+/* Search/focus dimming: kept in the render tree (never removed) so toggling focus/search is
+   instant and never disturbs React Flow's node bounds/layout. */
+.node.dimmed {
+  opacity: 0.15;
+  pointer-events: none;
+}
+
+.collapsedBadge {
+  margin-left: auto;
+  padding: 0 5px;
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.28);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 600;
+}
+
 .header {
   display: flex;
   align-items: center;

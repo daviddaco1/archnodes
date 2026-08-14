@@ -17,8 +17,12 @@ import {
 } from "@xyflow/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useGraph } from "../../context/GraphContext";
-import { nodeSchemas } from "../../schema/nodeSchemas";
+import { nodeSchemas, nodeSchemasByCategory } from "../../schema/nodeSchemas";
 import { defaultCompanionProps } from "../../schema/companionDefaults";
+import { matchesQuery } from "./graphSearch";
+import { getDescendantIds } from "./hierarchy";
+import { computeAutoLayout } from "./layout";
+import { CanvasSearchPanel } from "./CanvasSearchPanel";
 import type { AnyGraphNode, GraphEdge, NodeType } from "@project-visualizer/shared/graph.js";
 import * as api from "../../api/client";
 import type { SchemaResponse } from "../../api/client";
@@ -89,6 +93,8 @@ function toRFNodes(
   onRefInputQuickAdd: (nodeId: string, field: string, targetType: NodeType) => void,
   onRefOutputQuickAdd: (nodeId: string, holderType: NodeType, field: string) => void,
   connecting: ConnectingState | null,
+  isDimmed: (n: AnyGraphNode) => boolean,
+  hiddenCounts: Map<string, number>,
 ): RFNode<GenericNodeData | ContainerNodeData | NoteNodeData>[] {
   const nodesById = new Map(nodes.map((node) => [node.id, node]));
   const parents = nodes.filter((n) => STRUCTURAL_PARENT_TYPES.has(n.type));
@@ -102,7 +108,7 @@ function toRFNodes(
         parentId: n.containerId,
         extent: n.containerId ? ("parent" as const) : undefined,
         style: { width: 320, height: 220, zIndex: -1 },
-        data: { nodeType: n.type as "container" | "boundary", props: n.props as { label: string; kind?: string } },
+        data: { nodeType: n.type as "container" | "boundary", props: n.props as { label: string; kind?: string }, dimmed: isDimmed(n) },
       };
     }
     if (n.type === "note") {
@@ -112,7 +118,7 @@ function toRFNodes(
         position: n.position,
         parentId: n.containerId,
         extent: n.containerId ? ("parent" as const) : undefined,
-        data: { props: n.props as { text?: string; color?: "yellow" | "blue" | "pink" | "green" } },
+        data: { props: n.props as { text?: string; color?: "yellow" | "blue" | "pink" | "green" }, dimmed: isDimmed(n) },
       };
     }
     let highlight: "valid" | "invalid" | undefined;
@@ -172,6 +178,8 @@ function toRFNodes(
         onRefOutputQuickAdd: (holderType: NodeType, field: string) => onRefOutputQuickAdd(n.id, holderType, field),
         chainOutputPorts,
         hasChainInput,
+        dimmed: isDimmed(n),
+        hiddenDescendantCount: hiddenCounts.get(n.id),
       },
     };
   });
@@ -234,11 +242,17 @@ export function GraphCanvas({ category }: GraphCanvasProps) {
     setSelectedNodeId,
     notify,
   } = useGraph();
-  const { screenToFlowPosition } = useReactFlow();
+  const { screenToFlowPosition, fitView } = useReactFlow();
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const [connecting, setConnecting] = useState<ConnectingState | null>(null);
   const [edgeMenu, setEdgeMenu] = useState<EdgeMenuState | null>(null);
   const [nodeMenu, setNodeMenu] = useState<NodeMenuState | null>(null);
+
+  // View-only state: efímero, scoped to this canvas — never persisted, never in GraphContext.
+  const [searchQuery, setSearchQuery] = useState("");
+  const [typeFilter, setTypeFilter] = useState<Set<NodeType> | null>(null);
+  const [collapsedIds, setCollapsedIds] = useState<Set<string>>(new Set());
+  const [focusSet, setFocusSet] = useState<Set<string> | null>(null);
 
   const categoryNodes = useMemo(
     () => graphNodes.filter((n) => nodeSchemas[n.type].category === "structure" || nodeSchemas[n.type].category === category),
@@ -251,6 +265,123 @@ export function GraphCanvas({ category }: GraphCanvasProps) {
     [graphEdges, categoryNodeIds],
   );
   const nodesById = useMemo(() => new Map(graphNodes.map((n) => [n.id, n])), [graphNodes]);
+
+  // Collapsed subtrees are actually removed from the render (unlike search/focus dimming) — it's
+  // an explicit, infrequent action where the user expects the hidden nodes to really disappear.
+  const collapsedDescendants = useMemo(() => {
+    const all = new Set<string>();
+    for (const id of collapsedIds) {
+      if (!categoryNodeIds.has(id)) continue;
+      for (const d of getDescendantIds(id, categoryEdges)) all.add(d);
+    }
+    return all;
+  }, [collapsedIds, categoryEdges, categoryNodeIds]);
+  const hiddenCounts = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const id of collapsedIds) {
+      if (!categoryNodeIds.has(id) || collapsedDescendants.has(id)) continue; // nested under another collapsed node — no badge of its own
+      map.set(id, getDescendantIds(id, categoryEdges).size);
+    }
+    return map;
+  }, [collapsedIds, categoryEdges, categoryNodeIds, collapsedDescendants]);
+  const visibleNodes = useMemo(
+    () => categoryNodes.filter((n) => !collapsedDescendants.has(n.id)),
+    [categoryNodes, collapsedDescendants],
+  );
+  const visibleEdges = useMemo(
+    () => categoryEdges.filter((e) => !collapsedDescendants.has(e.source) && !collapsedDescendants.has(e.target)),
+    [categoryEdges, collapsedDescendants],
+  );
+
+  // Dimming (search/type filter/focus) never removes a node from the render — see the .dimmed CSS
+  // class — so toggling it is instant and never disturbs React Flow's layout/bounds.
+  const isDimmed = useCallback(
+    (n: AnyGraphNode) => {
+      const filterActive = searchQuery.trim().length > 0 || typeFilter !== null;
+      if (filterActive && !(matchesQuery(n, searchQuery) && (!typeFilter || typeFilter.has(n.type)))) return true;
+      if (focusSet && !focusSet.has(n.id)) return true;
+      return false;
+    },
+    [searchQuery, typeFilter, focusSet],
+  );
+
+  useEffect(() => {
+    if (!focusSet || focusSet.size === 0) return;
+    fitView({ nodes: [...focusSet].map((id) => ({ id })), duration: 300 });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusSet]);
+
+  const handleToggleType = useCallback(
+    (type: NodeType) => {
+      setTypeFilter((prev) => {
+        const allTypes = new Set(nodeSchemasByCategory(category).map((s) => s.type));
+        const base = prev ?? allTypes;
+        const next = new Set(base);
+        if (next.has(type)) next.delete(type);
+        else next.add(type);
+        return next.size === allTypes.size ? null : next;
+      });
+    },
+    [category],
+  );
+
+  const handleAutoLayout = useCallback(async () => {
+    try {
+      const positions = computeAutoLayout(categoryNodes, categoryEdges);
+      await api.batchUpdatePositions([...positions.entries()].map(([id, pos]) => ({ id, ...pos })));
+      await refetch();
+    } catch (err) {
+      notify(err instanceof Error ? err.message : String(err));
+    }
+  }, [categoryNodes, categoryEdges, refetch, notify]);
+
+  const handleFocusDependencies = useCallback(async () => {
+    if (!nodeMenu) return;
+    const id = nodeMenu.nodeId;
+    setNodeMenu(null);
+    try {
+      const related = await api.getNodeDependencies(id);
+      setFocusSet(new Set([id, ...related.map((r) => r.nodeId)]));
+    } catch (err) {
+      notify(err instanceof Error ? err.message : String(err));
+    }
+  }, [nodeMenu, notify]);
+
+  const handleFocusDependents = useCallback(async () => {
+    if (!nodeMenu) return;
+    const id = nodeMenu.nodeId;
+    setNodeMenu(null);
+    try {
+      const related = await api.getNodeDependents(id);
+      setFocusSet(new Set([id, ...related.map((r) => r.nodeId)]));
+    } catch (err) {
+      notify(err instanceof Error ? err.message : String(err));
+    }
+  }, [nodeMenu, notify]);
+
+  const handleFocusImpact = useCallback(async () => {
+    if (!nodeMenu) return;
+    const id = nodeMenu.nodeId;
+    setNodeMenu(null);
+    try {
+      const related = await api.getNodeAffected(id);
+      setFocusSet(new Set([id, ...related.map((r) => r.nodeId)]));
+    } catch (err) {
+      notify(err instanceof Error ? err.message : String(err));
+    }
+  }, [nodeMenu, notify]);
+
+  const handleToggleCollapse = useCallback(() => {
+    if (!nodeMenu) return;
+    const id = nodeMenu.nodeId;
+    setNodeMenu(null);
+    setCollapsedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, [nodeMenu]);
 
   const handleQuickAdd = useCallback(
     async (sourceId: string, targetType: NodeType) => {
@@ -406,7 +537,7 @@ export function GraphCanvas({ category }: GraphCanvasProps) {
   useEffect(() => {
     setRfNodes(
       toRFNodes(
-        categoryNodes,
+        visibleNodes,
         connectionRules,
         refPortRules,
         arrayRefPorts,
@@ -416,17 +547,19 @@ export function GraphCanvas({ category }: GraphCanvasProps) {
         handleRefInputQuickAdd,
         handleRefOutputQuickAdd,
         connecting,
+        isDimmed,
+        hiddenCounts,
       ),
     );
     setRfEdges([
-      ...toRFEdges(categoryEdges),
-      ...toSyntheticRefRFEdges(categoryNodes, schema?.refFields, categoryEdges),
-      ...toChainRFEdges(categoryNodes, schema?.refFields, categoryEdges),
+      ...toRFEdges(visibleEdges),
+      ...toSyntheticRefRFEdges(visibleNodes, schema?.refFields, visibleEdges),
+      ...toChainRFEdges(visibleNodes, schema?.refFields, visibleEdges),
     ]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
-    categoryNodes,
-    categoryEdges,
+    visibleNodes,
+    visibleEdges,
     connectionRules,
     refPortRules,
     arrayRefPorts,
@@ -437,6 +570,8 @@ export function GraphCanvas({ category }: GraphCanvasProps) {
     handleRefInputQuickAdd,
     handleRefOutputQuickAdd,
     connecting,
+    isDimmed,
+    hiddenCounts,
   ]);
 
   const chainSpecForHandle = useCallback(
@@ -648,6 +783,17 @@ export function GraphCanvas({ category }: GraphCanvasProps) {
         <Controls />
         <MiniMap pannable zoomable />
       </ReactFlow>
+      <CanvasSearchPanel
+        category={category}
+        searchQuery={searchQuery}
+        onSearchQueryChange={setSearchQuery}
+        selectedTypes={typeFilter}
+        onToggleType={handleToggleType}
+        onClearTypes={() => setTypeFilter(null)}
+        onAutoLayout={() => void handleAutoLayout()}
+        focusLabel={focusSet ? `${focusSet.size} nodos` : undefined}
+        onClearFocus={() => setFocusSet(null)}
+      />
       {edgeMenu && (
         <div
           ref={edgeMenuRef}
@@ -670,6 +816,8 @@ export function GraphCanvas({ category }: GraphCanvasProps) {
         (() => {
           const menuNode = nodesById.get(nodeMenu.nodeId);
           const otherContainers = availableContainers.filter((c) => c.id !== nodeMenu.nodeId);
+          const hasHierarchyChildren = categoryEdges.some((e) => e.edgeType === "hierarchy" && e.source === nodeMenu.nodeId);
+          const isCollapsed = collapsedIds.has(nodeMenu.nodeId);
           return (
             <div
               ref={nodeMenuRef}
@@ -683,6 +831,20 @@ export function GraphCanvas({ category }: GraphCanvasProps) {
               <button type="button" className={styles.menuItem} onClick={handleCopyNodeId}>
                 Copiar ID
               </button>
+              <button type="button" className={styles.menuItem} onClick={() => void handleFocusDependencies()}>
+                Foco: dependencias
+              </button>
+              <button type="button" className={styles.menuItem} onClick={() => void handleFocusDependents()}>
+                Foco: dependientes
+              </button>
+              <button type="button" className={styles.menuItem} onClick={() => void handleFocusImpact()}>
+                Foco: impacto
+              </button>
+              {hasHierarchyChildren && (
+                <button type="button" className={styles.menuItem} onClick={handleToggleCollapse}>
+                  {isCollapsed ? "Expandir subárbol" : "Colapsar subárbol"}
+                </button>
+              )}
               {otherContainers.length > 0 &&
                 otherContainers.map((c) => (
                   <button key={c.id} type="button" className={styles.menuItem} onClick={() => void handleMoveToContainer(c.id)}>
@@ -722,7 +884,7 @@ export function GraphCanvas({ category }: GraphCanvasProps) {
                 setPendingDeleteId(null);
                 setRfNodes(
                   toRFNodes(
-                    categoryNodes,
+                    visibleNodes,
                     connectionRules,
                     refPortRules,
                     arrayRefPorts,
@@ -732,6 +894,8 @@ export function GraphCanvas({ category }: GraphCanvasProps) {
                     handleRefInputQuickAdd,
                     handleRefOutputQuickAdd,
                     null,
+                    isDimmed,
+                    hiddenCounts,
                   ),
                 );
               }}

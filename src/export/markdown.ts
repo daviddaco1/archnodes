@@ -23,25 +23,41 @@ import { validateProjectGraph, type ValidationIssue, type ValidationResult } fro
 
 // ---- graph traversal helpers ----
 
-function hierarchyChildren(nodeId: string, edges: GraphEdge[], nodesById: Map<string, AnyGraphNode>): AnyGraphNode[] {
-  return edges
-    .filter((e) => e.edgeType === "hierarchy" && e.source === nodeId)
-    .map((e) => nodesById.get(e.target))
-    .filter((n): n is AnyGraphNode => Boolean(n));
+// parentId -> its hierarchy children, built once per export instead of filtering the full edges
+// array on every call — the tree walk below touches every node, so an O(edges) scan per node
+// (the old hierarchyChildren) made the whole export O(nodes × edges); this makes each lookup O(1).
+type ChildrenIndex = Map<string, AnyGraphNode[]>;
+
+function buildChildrenIndex(nodes: AnyGraphNode[], edges: GraphEdge[]): ChildrenIndex {
+  const nodesById = new Map(nodes.map((n) => [n.id, n]));
+  const index: ChildrenIndex = new Map();
+  for (const edge of edges) {
+    if (edge.edgeType !== "hierarchy") continue;
+    const child = nodesById.get(edge.target);
+    if (!child) continue;
+    const list = index.get(edge.source);
+    if (list) list.push(child);
+    else index.set(edge.source, [child]);
+  }
+  return index;
+}
+
+function hierarchyChildren(nodeId: string, childrenByParent: ChildrenIndex): AnyGraphNode[] {
+  return childrenByParent.get(nodeId) ?? [];
 }
 
 // The store rejects hierarchy cycles at write time, but this guards data written before that
 // check existed (or edited by hand) — without it a cycle would hang export forever.
-function collectDescendants(nodeId: string, edges: GraphEdge[], nodesById: Map<string, AnyGraphNode>): AnyGraphNode[] {
+function collectDescendants(nodeId: string, childrenByParent: ChildrenIndex): AnyGraphNode[] {
   const result: AnyGraphNode[] = [];
   const visited = new Set<string>([nodeId]);
-  const stack = [...hierarchyChildren(nodeId, edges, nodesById)];
+  const stack = [...hierarchyChildren(nodeId, childrenByParent)];
   while (stack.length > 0) {
     const node = stack.shift()!;
     if (visited.has(node.id)) continue;
     visited.add(node.id);
     result.push(node);
-    stack.push(...hierarchyChildren(node.id, edges, nodesById));
+    stack.push(...hierarchyChildren(node.id, childrenByParent));
   }
   return result;
 }
@@ -64,14 +80,15 @@ interface ResolvedChain {
   service?: AnyGraphNode;
 }
 
-function resolveChain(endpointId: string, edges: GraphEdge[], nodesById: Map<string, AnyGraphNode>): ResolvedChain {
+function resolveChain(endpointId: string, childrenByParent: ChildrenIndex): ResolvedChain {
   const middlewares: AnyGraphNode[] = [];
   let service: AnyGraphNode | undefined;
   let currentId = endpointId;
+  const visited = new Set<string>(); // guards a middleware chain that cycles back on itself
 
-  // safety bound: a real graph can't have more hierarchy hops than total nodes
-  for (let i = 0; i < nodesById.size; i++) {
-    const children = hierarchyChildren(currentId, edges, nodesById);
+  while (!visited.has(currentId)) {
+    visited.add(currentId);
+    const children = hierarchyChildren(currentId, childrenByParent);
     const middleware = children.find((c) => c.type === "middleware");
     const svc = children.find((c) => c.type === "service");
     // A service sibling next to a middleware is still recorded — the middleware descent below
@@ -135,11 +152,10 @@ function renderChain(
   startId: string,
   ownReturns: ReturnSpec[] | undefined,
   sourceLabel: string,
-  edges: GraphEdge[],
-  nodesById: Map<string, AnyGraphNode>,
+  childrenByParent: ChildrenIndex,
 ): string {
   const parts: string[] = [];
-  const { middlewares, service } = resolveChain(startId, edges, nodesById);
+  const { middlewares, service } = resolveChain(startId, childrenByParent);
 
   if (middlewares.length > 0) {
     parts.push("**Middleware chain**", "");
@@ -177,18 +193,18 @@ function renderChain(
   return parts.join("\n");
 }
 
-function renderOperation(node: AnyGraphNode, edges: GraphEdge[], nodesById: Map<string, AnyGraphNode>): string {
+function renderOperation(node: AnyGraphNode, childrenByParent: ChildrenIndex): string {
   const props = node.props as OperationProps;
   const parts: string[] = [`**Operation: ${props.method}** (\`${node.id}\`)`, ""];
   if (props.description) parts.push(props.description, "");
   parts.push(renderParamTable("Query", props.query));
   parts.push(renderParamTable("Path params", props.params));
   parts.push(renderParamTable("Body", props.body));
-  parts.push(renderChain(node.id, props.returns, "operation", edges, nodesById));
+  parts.push(renderChain(node.id, props.returns, "operation", childrenByParent));
   return parts.join("\n") + "\n";
 }
 
-function renderEndpoint(node: AnyGraphNode, headerLevel: number, edges: GraphEdge[], nodesById: Map<string, AnyGraphNode>): string {
+function renderEndpoint(node: AnyGraphNode, headerLevel: number, childrenByParent: ChildrenIndex, nodesById: Map<string, AnyGraphNode>): string {
   const props = node.props as EndpointProps;
   const fullPath = computeFullPath(node, nodesById);
   const hashes = "#".repeat(headerLevel);
@@ -204,10 +220,10 @@ function renderEndpoint(node: AnyGraphNode, headerLevel: number, edges: GraphEdg
   );
   parts.push(renderParamTable("Headers", props.headers));
 
-  const operations = hierarchyChildren(node.id, edges, nodesById).filter((c) => c.type === "operation");
+  const operations = hierarchyChildren(node.id, childrenByParent).filter((c) => c.type === "operation");
   // An endpoint with operation children delegates its middleware/service chain rendering to
   // each operation's own chain — rendering it here too would show the same chain twice.
-  if (operations.length === 0) parts.push(renderChain(node.id, undefined, "endpoint", edges, nodesById));
+  if (operations.length === 0) parts.push(renderChain(node.id, undefined, "endpoint", childrenByParent));
 
   if (props.cacheable?.enabled) {
     parts.push(
@@ -221,7 +237,7 @@ function renderEndpoint(node: AnyGraphNode, headerLevel: number, edges: GraphEdg
     );
   }
 
-  for (const op of operations) parts.push(renderOperation(op, edges, nodesById));
+  for (const op of operations) parts.push(renderOperation(op, childrenByParent));
 
   return parts.join("\n") + "\n";
 }
@@ -229,7 +245,7 @@ function renderEndpoint(node: AnyGraphNode, headerLevel: number, edges: GraphEdg
 function renderRoute(
   node: AnyGraphNode,
   headerLevel: number,
-  edges: GraphEdge[],
+  childrenByParent: ChildrenIndex,
   nodesById: Map<string, AnyGraphNode>,
   visited: Set<string> = new Set(),
 ): string {
@@ -240,14 +256,14 @@ function renderRoute(
   if (visited.has(node.id)) return parts.join("\n");
   visited.add(node.id);
 
-  for (const child of hierarchyChildren(node.id, edges, nodesById)) {
-    if (child.type === "route") parts.push(renderRoute(child, headerLevel + 1, edges, nodesById, visited));
-    if (child.type === "endpoint") parts.push(renderEndpoint(child, headerLevel + 1, edges, nodesById));
+  for (const child of hierarchyChildren(node.id, childrenByParent)) {
+    if (child.type === "route") parts.push(renderRoute(child, headerLevel + 1, childrenByParent, nodesById, visited));
+    if (child.type === "endpoint") parts.push(renderEndpoint(child, headerLevel + 1, childrenByParent, nodesById));
   }
   return parts.join("\n");
 }
 
-function renderDomain(node: AnyGraphNode, edges: GraphEdge[], nodesById: Map<string, AnyGraphNode>): string {
+function renderDomain(node: AnyGraphNode, childrenByParent: ChildrenIndex, nodesById: Map<string, AnyGraphNode>): string {
   const props = node.props as { name: string; domain?: string; ipPort?: string; description?: string };
   const parts: string[] = [`### Domain: ${props.name} (\`${node.id}\`)`, ""];
   if (props.domain) parts.push(`- Domain: \`${props.domain}\``);
@@ -255,16 +271,16 @@ function renderDomain(node: AnyGraphNode, edges: GraphEdge[], nodesById: Map<str
   if (props.description) parts.push("", props.description);
   parts.push("");
 
-  for (const child of hierarchyChildren(node.id, edges, nodesById)) {
+  for (const child of hierarchyChildren(node.id, childrenByParent)) {
     if (child.type === "subdomain") {
       const subProps = child.props as { name: string; subdomain?: string };
       const fullHost = subProps.subdomain && props.domain ? ` — \`${subProps.subdomain}.${props.domain}\`` : "";
       parts.push(`#### Subdomain: ${subProps.name}${fullHost} (\`${child.id}\`)`, "");
-      for (const grandchild of hierarchyChildren(child.id, edges, nodesById)) {
-        if (grandchild.type === "route") parts.push(renderRoute(grandchild, 5, edges, nodesById));
+      for (const grandchild of hierarchyChildren(child.id, childrenByParent)) {
+        if (grandchild.type === "route") parts.push(renderRoute(grandchild, 5, childrenByParent, nodesById));
       }
     }
-    if (child.type === "route") parts.push(renderRoute(child, 4, edges, nodesById));
+    if (child.type === "route") parts.push(renderRoute(child, 4, childrenByParent, nodesById));
   }
   return parts.join("\n");
 }
@@ -276,18 +292,18 @@ function renderList(title: string, items: string[]): string {
   return `### ${title}\n\n${items.map((i) => `- ${i}`).join("\n")}\n\n`;
 }
 
-function renderWebsockets(nodes: AnyGraphNode[], edges: GraphEdge[], nodesById: Map<string, AnyGraphNode>): string {
+function renderWebsockets(nodes: AnyGraphNode[], childrenByParent: ChildrenIndex): string {
   const sockets = nodes.filter((n) => n.type === "websocket");
   if (sockets.length === 0) return "";
   const parts: string[] = ["### WebSockets", ""];
   for (const socket of sockets) {
     const socketProps = socket.props as { name: string; namespace?: string };
     parts.push(`- ${socketProps.name}${socketProps.namespace ? ` (\`${socketProps.namespace}\`)` : ""} (\`${socket.id}\`)`);
-    for (const event of hierarchyChildren(socket.id, edges, nodesById)) {
+    for (const event of hierarchyChildren(socket.id, childrenByParent)) {
       if (event.type !== "websocketEvent") continue;
       const eventProps = event.props as WebSocketEventProps;
       parts.push(`  - on \`${eventProps.event}\` (\`${event.id}\`)`);
-      for (const emit of hierarchyChildren(event.id, edges, nodesById)) {
+      for (const emit of hierarchyChildren(event.id, childrenByParent)) {
         if (emit.type !== "websocketEmit") continue;
         const emitProps = emit.props as WebSocketEmitProps;
         const target =
@@ -300,7 +316,7 @@ function renderWebsockets(nodes: AnyGraphNode[], edges: GraphEdge[], nodesById: 
   return parts.join("\n");
 }
 
-function renderInfraSections(nodes: AnyGraphNode[], edges: GraphEdge[], nodesById: Map<string, AnyGraphNode>): string {
+function renderInfraSections(nodes: AnyGraphNode[], childrenByParent: ChildrenIndex): string {
   const models = nodes.filter((n) => n.type === "model").map((n) => `${(n.props as { name: string }).name} (\`${n.id}\`)`);
   const tables = nodes.filter((n) => n.type === "table").map((n) => `${(n.props as { name: string }).name} (\`${n.id}\`)`);
   const tools = nodes
@@ -313,7 +329,7 @@ function renderInfraSections(nodes: AnyGraphNode[], edges: GraphEdge[], nodesByI
     renderList("Models", models),
     renderList("Tables", tables),
     renderList("Tools & Infra", tools),
-    renderWebsockets(nodes, edges, nodesById),
+    renderWebsockets(nodes, childrenByParent),
     renderList("External APIs", externalApis),
     renderList("Emails", emails),
   ].join("");
@@ -321,7 +337,7 @@ function renderInfraSections(nodes: AnyGraphNode[], edges: GraphEdge[], nodesByI
 
 // ---- frontend ----
 
-function renderFrontend(nodes: AnyGraphNode[], edges: GraphEdge[], nodesById: Map<string, AnyGraphNode>): string {
+function renderFrontend(nodes: AnyGraphNode[], childrenByParent: ChildrenIndex, nodesById: Map<string, AnyGraphNode>): string {
   const parts: string[] = ["## Frontend", ""];
 
   const navRouters = nodes.filter((n) => n.type === "navigationRouter");
@@ -342,7 +358,7 @@ function renderFrontend(nodes: AnyGraphNode[], edges: GraphEdge[], nodesById: Ma
   for (const page of pages) {
     const props = page.props as PageProps;
     parts.push(`### Page: ${props.name} (\`${page.id}\`)`, "");
-    const descendants = collectDescendants(page.id, edges, nodesById);
+    const descendants = collectDescendants(page.id, childrenByParent);
 
     const components = descendants.filter((n) => n.type === "component");
     if (components.length > 0) {
@@ -416,6 +432,7 @@ function renderValidationWarnings(validation: ValidationResult): string {
 
 export function exportMarkdown(graph: ProjectGraph, validation?: ValidationResult, domainId?: string): string {
   const nodesById = new Map(graph.nodes.map((n) => [n.id, n]));
+  const childrenByParent = buildChildrenIndex(graph.nodes, graph.edges);
   const resolvedValidation = validation ?? validateProjectGraph(graph);
 
   const parts: string[] = [renderManifest(graph)];
@@ -424,21 +441,21 @@ export function exportMarkdown(graph: ProjectGraph, validation?: ValidationResul
   const hasBackend = domains.length > 0 || graph.nodes.some((n) => BACKEND_TYPE_SET.has(n.type));
   if (hasBackend) {
     parts.push("## Backend", "");
-    for (const domain of domains) parts.push(renderDomain(domain, graph.edges, nodesById));
+    for (const domain of domains) parts.push(renderDomain(domain, childrenByParent, nodesById));
 
     let infraNodes = graph.nodes;
     if (domainId) {
       const scopedIds = new Set(domains.map((d) => d.id));
       for (const domain of domains) {
-        for (const descendant of collectDescendants(domain.id, graph.edges, nodesById)) scopedIds.add(descendant.id);
+        for (const descendant of collectDescendants(domain.id, childrenByParent)) scopedIds.add(descendant.id);
       }
       infraNodes = graph.nodes.filter((n) => scopedIds.has(n.id));
     }
-    parts.push(renderInfraSections(infraNodes, graph.edges, nodesById));
+    parts.push(renderInfraSections(infraNodes, childrenByParent));
   }
 
   const hasFrontend = graph.nodes.some((n) => n.type === "page" || n.type === "navigationRouter" || n.type === "stateStore");
-  if (hasFrontend) parts.push(renderFrontend(graph.nodes, graph.edges, nodesById));
+  if (hasFrontend) parts.push(renderFrontend(graph.nodes, childrenByParent, nodesById));
 
   parts.push(renderValidationWarnings(resolvedValidation));
 

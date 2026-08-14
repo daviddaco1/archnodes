@@ -8,6 +8,12 @@ import { exportMarkdown } from "../export/markdown.js";
 import type { EdgeType, NodeType, ProjectScope } from "../types/graph.js";
 import { getAffectedNodes, getDependencies, getDependents } from "../analysis/dependencies.js";
 import { analyzeChange, planChange } from "../analysis/change.js";
+import { importProject } from "../analysis/import.js";
+import { detectConflicts } from "../analysis/sync-report.js";
+import { summarizeProject } from "../analysis/summary.js";
+import { searchGraph } from "../analysis/search.js";
+import { getProjectContext } from "../analysis/context.js";
+import { canPerform, type Role } from "../security/permissions.js";
 
 function textResult(data: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
@@ -29,6 +35,16 @@ function tryResult<T>(fn: () => T) {
   }
 }
 
+// Same as tryResult, but for the tools that mutate the project — gates on the fixed role this MCP
+// process was started with (see cli.ts's `mcp --role`). Not a per-caller/per-token check (stdio
+// has no such concept); this is the Fase 16 seam, not a multi-user system.
+function tryWriteResult<T>(role: Role, fn: () => T) {
+  return tryResult(() => {
+    if (!canPerform(role, "write")) throw new Error(`Role "${role}" cannot perform write operations`);
+    return fn();
+  });
+}
+
 const scopeSchema = z.enum(["backend", "frontend", "all"]).optional();
 const edgeTypeSchema = z.enum(["hierarchy", "invalidates"]).optional();
 const batchMutatorMethodSchema = z.enum([
@@ -43,9 +59,44 @@ const batchMutatorMethodSchema = z.enum([
   "updateManifest",
 ]);
 const batchOpSchema = z.object({ method: batchMutatorMethodSchema, args: z.array(z.unknown()) });
+const importCandidateNodeSchema = z.object({
+  tempId: z.string(),
+  type: z.string(),
+  props: z.record(z.unknown()),
+  parentId: z.string().optional(),
+  sourcePath: z.string().optional(),
+  sourceHash: z.string().optional(),
+});
+const importCandidateEdgeSchema = z.object({ sourceId: z.string(), targetId: z.string(), edgeType: edgeTypeSchema });
 
-export function createMcpServer(store: ProjectStore): McpServer {
+export interface CreateMcpServerOptions {
+  /** Fixed role for every write this MCP process performs. Defaults to "owner" (today's behavior: full access). */
+  role?: Role;
+}
+
+export function createMcpServer(store: ProjectStore, opts: CreateMcpServerOptions = {}): McpServer {
   const server = new McpServer({ name: "project-visualizer", version: "0.1.0" });
+  const role: Role = opts.role ?? "owner";
+
+  // Wrapped once, here, instead of touching every registerTool call below: every tool this server
+  // ever registers gets an audit-log entry for free (transport, operation name, success/failure,
+  // duration) without a per-tool edit. See src/audit/audit-log.ts for why this is separate from history.
+  const registerTool = server.registerTool.bind(server);
+  server.registerTool = ((name: string, config: unknown, handler: (...args: unknown[]) => Promise<{ content: { text: string }[]; isError?: boolean }>) => {
+    return registerTool(name, config as never, (async (...args: unknown[]) => {
+      const start = Date.now();
+      const result = await handler(...args);
+      store.recordAudit({
+        transport: "mcp",
+        operation: name,
+        identity: { role },
+        result: result.isError ? "FAILURE" : "SUCCESS",
+        errorMessage: result.isError ? result.content[0]?.text : undefined,
+        durationMs: Date.now() - start,
+      });
+      return result;
+    }) as never);
+  }) as typeof server.registerTool;
 
   server.registerTool(
     "get_schema",
@@ -122,6 +173,23 @@ export function createMcpServer(store: ProjectStore): McpServer {
   );
 
   server.registerTool(
+    "get_project_context",
+    {
+      description:
+        "Bounded alternative to get_project('all') for working on one node: the full focus node plus a " +
+        "depth/count-limited neighborhood (ids/types/labels only, not full nodes). depth clamps to 5, " +
+        "maxNodes clamps to 200 regardless of what's requested.",
+      inputSchema: {
+        id: z.string(),
+        depth: z.number().optional(),
+        direction: z.enum(["dependencies", "dependents", "both"]).optional(),
+        maxNodes: z.number().optional(),
+      },
+    },
+    async ({ id, depth, direction, maxNodes }) => tryResult(() => getProjectContext(store, id, { depth, direction, maxNodes })),
+  );
+
+  server.registerTool(
     "validate_project",
     { description: "Validate the project graph and return issues" },
     async () => tryResult(() => store.validateProject()),
@@ -133,7 +201,7 @@ export function createMcpServer(store: ProjectStore): McpServer {
       description: "Create a node",
       inputSchema: { type: z.string(), props: z.record(z.unknown()), parentId: z.string().optional() },
     },
-    async ({ type, props, parentId }) => tryResult(() => store.createNode(type as NodeType, props, parentId, { source: "mcp" })),
+    async ({ type, props, parentId }) => tryWriteResult(role, () => store.createNode(type as NodeType, props, parentId, { source: "mcp", role })),
   );
 
   server.registerTool(
@@ -142,7 +210,7 @@ export function createMcpServer(store: ProjectStore): McpServer {
       description: "Update a node's props",
       inputSchema: { id: z.string(), props: z.record(z.unknown()) },
     },
-    async ({ id, props }) => tryResult(() => store.updateNode(id, props, { source: "mcp" })),
+    async ({ id, props }) => tryWriteResult(role, () => store.updateNode(id, props, { source: "mcp", role })),
   );
 
   server.registerTool(
@@ -151,7 +219,7 @@ export function createMcpServer(store: ProjectStore): McpServer {
       description: "Move a node on the canvas",
       inputSchema: { id: z.string(), position: z.object({ x: z.number(), y: z.number() }) },
     },
-    async ({ id, position }) => tryResult(() => store.setPosition(id, position, { source: "mcp" })),
+    async ({ id, position }) => tryWriteResult(role, () => store.setPosition(id, position, { source: "mcp", role })),
   );
 
   server.registerTool(
@@ -160,7 +228,7 @@ export function createMcpServer(store: ProjectStore): McpServer {
       description: "Set or clear a node's visual container grouping (not a hierarchy edge)",
       inputSchema: { id: z.string(), containerId: z.string().optional() },
     },
-    async ({ id, containerId }) => tryResult(() => store.setContainer(id, containerId, { source: "mcp" })),
+    async ({ id, containerId }) => tryWriteResult(role, () => store.setContainer(id, containerId, { source: "mcp", role })),
   );
 
   server.registerTool(
@@ -169,7 +237,7 @@ export function createMcpServer(store: ProjectStore): McpServer {
       description: "Delete a node, optionally cascading to its hierarchy children",
       inputSchema: { id: z.string(), cascade: z.boolean().optional() },
     },
-    async ({ id, cascade }) => tryResult(() => store.deleteNode(id, cascade, { source: "mcp" })),
+    async ({ id, cascade }) => tryWriteResult(role, () => store.deleteNode(id, cascade, { source: "mcp", role })),
   );
 
   server.registerTool(
@@ -179,7 +247,7 @@ export function createMcpServer(store: ProjectStore): McpServer {
       inputSchema: { sourceId: z.string(), targetId: z.string(), edgeType: edgeTypeSchema },
     },
     async ({ sourceId, targetId, edgeType }) =>
-      tryResult(() => store.connectNodes(sourceId, targetId, edgeType as EdgeType | undefined, { source: "mcp" })),
+      tryWriteResult(role, () => store.connectNodes(sourceId, targetId, edgeType as EdgeType | undefined, { source: "mcp", role })),
   );
 
   server.registerTool(
@@ -189,8 +257,8 @@ export function createMcpServer(store: ProjectStore): McpServer {
       inputSchema: { id: z.string() },
     },
     async ({ id }) =>
-      tryResult(() => {
-        store.deleteEdge(id, { source: "mcp" });
+      tryWriteResult(role, () => {
+        store.deleteEdge(id, { source: "mcp", role });
         return { deleted: true };
       }),
   );
@@ -206,10 +274,22 @@ export function createMcpServer(store: ProjectStore): McpServer {
       },
     },
     async ({ nodes, edges, mode }) =>
-      tryResult(() => {
-        store.importGraph(nodes as never, edges as never, mode, { source: "import" });
+      tryWriteResult(role, () => {
+        store.importGraph(nodes as never, edges as never, mode, { source: "import", role });
         return { imported: true };
       }),
+  );
+
+  server.registerTool(
+    "import_project",
+    {
+      description:
+        "Repeatable import: matches candidates against existing nodes by sourcePath (same type -> update, " +
+        "different type -> reported conflict, no match -> create), remapping caller-local tempIds to real " +
+        "ids for parentId/edges. Reports created/updated/orphaned/conflicts; never deletes, never marks generated.",
+      inputSchema: { nodes: z.array(importCandidateNodeSchema), edges: z.array(importCandidateEdgeSchema) },
+    },
+    async ({ nodes, edges }) => tryWriteResult(role, () => importProject(store, nodes as never, edges as never, { source: "import", role })),
   );
 
   server.registerTool(
@@ -220,7 +300,7 @@ export function createMcpServer(store: ProjectStore): McpServer {
         "none do if any operation fails (the graph is rolled back and no partial write happens).",
       inputSchema: { operations: z.array(batchOpSchema) },
     },
-    async ({ operations }) => tryResult(() => store.applyBatch(operations as BatchOp[], { source: "mcp" })),
+    async ({ operations }) => tryWriteResult(role, () => store.applyBatch(operations as BatchOp[], { source: "mcp", role })),
   );
 
   server.registerTool(
@@ -254,6 +334,27 @@ export function createMcpServer(store: ProjectStore): McpServer {
   );
 
   server.registerTool(
+    "analyze_project",
+    {
+      description:
+        "Executive summary layered on existing data: node/edge counts by type, health + validation " +
+        "(reused as-is, not recomputed), top-N most-connected nodes, and nodes with neither generated:true " +
+        "nor sourcePath (never touched by scaffold or import).",
+      inputSchema: { topN: z.number().optional() },
+    },
+    async ({ topN }) => tryResult(() => summarizeProject(store.getProject("all"), topN)),
+  );
+
+  server.registerTool(
+    "search_graph",
+    {
+      description: "Free-text substring search over node labels and props. Returns ids/labels/snippets, not full nodes — call get_node for detail.",
+      inputSchema: { query: z.string(), types: z.array(z.string()).optional(), limit: z.number().optional() },
+    },
+    async ({ query, types, limit }) => tryResult(() => searchGraph(store.getProject("all"), query, { types: types as never, limit })),
+  );
+
+  server.registerTool(
     "analyze_health",
     { description: "Structural validation plus quality diagnostics (orphan nodes, unused nodes, ref-field cycles) — never write-blocking" },
     async () => tryResult(() => store.checkHealth()),
@@ -267,14 +368,17 @@ export function createMcpServer(store: ProjectStore): McpServer {
         "get_sync_status calls can tell in_sync from code_changed/graph_changed/conflict.",
       inputSchema: { id: z.string(), sourceHash: z.string().optional(), sourcePath: z.string().optional() },
     },
-    async ({ id, sourceHash, sourcePath }) => tryResult(() => store.recordSync(id, { sourceHash, sourcePath }, { source: "sync" })),
+    async ({ id, sourceHash, sourcePath }) => tryWriteResult(role, () => store.recordSync(id, { sourceHash, sourcePath }, { source: "sync", role })),
   );
 
   server.registerTool(
     "get_sync_status",
     {
-      description: "Compare a node's recorded source hash against a freshly computed one: in_sync | code_changed | graph_changed | conflict | unknown",
-      inputSchema: { id: z.string(), currentHash: z.string().optional() },
+      description:
+        "Compare a node's recorded source hash against a freshly computed one: in_sync | code_changed | " +
+        "graph_changed | conflict | code_deleted | unknown. Pass currentHash: null (not omitted) when the " +
+        "agent confirmed the source file no longer exists.",
+      inputSchema: { id: z.string(), currentHash: z.string().nullable().optional() },
     },
     async ({ id, currentHash }) =>
       tryResult(() => {
@@ -287,21 +391,41 @@ export function createMcpServer(store: ProjectStore): McpServer {
     "get_bulk_sync_status",
     {
       description: "Same as get_sync_status, for every node in the project at once — one call for a full-project sync check",
-      inputSchema: { hashes: z.record(z.string()) },
+      inputSchema: { hashes: z.record(z.string().nullable()) },
     },
     async ({ hashes }) => tryResult(() => store.getBulkSyncStatus(hashes)),
   );
 
   server.registerTool(
+    "detect_conflicts",
+    {
+      description:
+        "Buckets every node with a sourcePath (or a given scope of node ids) by sync status: inSync/codeChanged/" +
+        "graphChanged/conflict/codeDeleted/unknown. Wraps get_bulk_sync_status for a full-project sync pass.",
+      inputSchema: { hashes: z.record(z.string().nullable()), scope: z.array(z.string()).optional() },
+    },
+    async ({ hashes, scope }) => tryResult(() => detectConflicts(store, hashes, scope)),
+  );
+
+  server.registerTool(
     "undo",
     { description: "Revert the most recently committed history entry" },
-    async () => tryResult(() => store.undo()),
+    async () => tryWriteResult(role, () => store.undo()),
   );
 
   server.registerTool(
     "redo",
     { description: "Re-apply the most recently undone history entry" },
-    async () => tryResult(() => store.redo()),
+    async () => tryWriteResult(role, () => store.redo()),
+  );
+
+  server.registerTool(
+    "get_audit_log",
+    {
+      description: "List recorded audit entries (every REST/MCP operation, not just mutations), optionally limited or filtered to before a timestamp",
+      inputSchema: { limit: z.number().optional(), before: z.string().optional() },
+    },
+    async ({ limit, before }) => tryResult(() => store.listAuditLog({ limit, before })),
   );
 
   server.registerTool(
@@ -319,7 +443,7 @@ export function createMcpServer(store: ProjectStore): McpServer {
       description: "Move the graph to the state right after the given history entry was originally applied",
       inputSchema: { entryId: z.string() },
     },
-    async ({ entryId }) => tryResult(() => store.restoreVersion(entryId)),
+    async ({ entryId }) => tryWriteResult(role, () => store.restoreVersion(entryId)),
   );
 
   server.registerTool(
@@ -346,7 +470,7 @@ export function createMcpServer(store: ProjectStore): McpServer {
   return server;
 }
 
-export async function startMcpServer(store: ProjectStore): Promise<void> {
-  const server = createMcpServer(store);
+export async function startMcpServer(store: ProjectStore, opts: CreateMcpServerOptions = {}): Promise<void> {
+  const server = createMcpServer(store, opts);
   await server.connect(new StdioServerTransport());
 }

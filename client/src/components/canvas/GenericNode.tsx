@@ -28,6 +28,8 @@ export interface GenericNodeData {
   props: Record<string, unknown>;
   resolvedTitle?: string;
   highlight?: "valid" | "invalid";
+  dimmed?: boolean;
+  hiddenDescendantCount?: number;
   compatibleTypes?: NodeType[];
   incomingCompatibleTypes?: NodeType[];
   canReceiveConnection?: boolean;
@@ -42,7 +44,7 @@ export interface GenericNodeData {
   [key: string]: unknown;
 }
 
-function pickTitle(schema: (typeof nodeSchemas)[NodeType], props: Record<string, unknown>): string {
+export function pickTitle(schema: (typeof nodeSchemas)[NodeType], props: Record<string, unknown>): string {
   if (typeof props.name === "string" && props.name) return props.name;
   if (typeof props.label === "string" && props.label) return props.label;
   for (const field of schema.fields) {
@@ -170,14 +172,16 @@ export function GenericNode({ data, selected }: NodeProps & { data: GenericNodeD
   const hasChainInput = data.hasChainInput ?? false;
 
   const highlightClass = data.highlight === "valid" ? styles.valid : data.highlight === "invalid" ? styles.invalid : "";
+  const dimmedClass = data.dimmed ? styles.dimmed : "";
 
   return (
     <div className={styles.wrapper}>
       {canReceiveConnection && <Handle type="target" position={Position.Top} />}
-      <div className={`${styles.node} ${selected ? styles.selected : ""} ${highlightClass}`}>
+      <div className={`${styles.node} ${selected ? styles.selected : ""} ${highlightClass} ${dimmedClass}`}>
         <div className={styles.header} style={{ background: schema.color }}>
           <span className={styles.icon}>{schema.icon}</span>
           <span className={styles.type}>{schema.type}</span>
+          {Boolean(data.hiddenDescendantCount) && <span className={styles.collapsedBadge}>+{data.hiddenDescendantCount}</span>}
         </div>
         <div className={styles.body}>
           <div>{title}</div>

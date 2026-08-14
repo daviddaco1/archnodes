@@ -26,13 +26,18 @@ const EXPECTED_TOOLS = [
   "get_dependencies",
   "get_dependents",
   "get_affected_nodes",
+  "get_project_context",
   "validate_project",
   "analyze_change",
   "plan_change",
+  "analyze_project",
+  "search_graph",
   "analyze_health",
+  "get_audit_log",
   "record_sync",
   "get_sync_status",
   "get_bulk_sync_status",
+  "detect_conflicts",
   "create_node",
   "update_node",
   "set_position",
@@ -41,6 +46,7 @@ const EXPECTED_TOOLS = [
   "connect_nodes",
   "delete_edge",
   "import_graph",
+  "import_project",
   "export_markdown",
   "batch_operations",
   "undo",
@@ -118,6 +124,30 @@ describe("createMcpServer", () => {
 
     const status = JSON.parse((await tools.get_sync_status.handler({ id: domain.id, currentHash: "abc123" }, {})).content[0].text);
     expect(status.status).toBe("in_sync");
+  });
+
+  it("a viewer-role MCP server rejects write tools but allows read tools", async () => {
+    const server = createMcpServer(store, { role: "viewer" });
+    const tools = (server as unknown as { _registeredTools: Record<string, { handler: (args: unknown, extra: unknown) => Promise<{ content: { text: string }[]; isError?: boolean }> }> })._registeredTools;
+
+    const created = await tools.create_node.handler({ type: "domain", props: { name: "Auth" } }, {});
+    expect(created.isError).toBe(true);
+    expect(created.content[0].text).toMatch(/cannot perform write operations/);
+
+    const validated = await tools.validate_project.handler({}, {});
+    expect(validated.isError).toBeFalsy();
+  });
+
+  it("audits every tool call, success and failure alike", async () => {
+    const server = createMcpServer(store);
+    const tools = (server as unknown as { _registeredTools: Record<string, { handler: (args: unknown, extra: unknown) => Promise<{ content: { text: string }[]; isError?: boolean }> }> })._registeredTools;
+
+    await tools.create_node.handler({ type: "domain", props: { name: "Auth" } }, {});
+    await tools.get_node.handler({ id: "does-not-exist" }, {});
+
+    const log = store.listAuditLog();
+    expect(log.some((e) => e.operation === "create_node" && e.result === "SUCCESS")).toBe(true);
+    expect(log.some((e) => e.operation === "get_node" && e.result === "FAILURE")).toBe(true);
   });
 
   it("get_node returns a proper error (not a stringified undefined) for a missing id", async () => {

@@ -4,7 +4,11 @@ import { networkInterfaces } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
+import rateLimit from "express-rate-limit";
 import type { BatchOp, ProjectStore } from "./store/project-store.js";
+import { authMiddleware } from "./security/auth.js";
+import { canPerform, type PermissionAction, type Role } from "./security/permissions.js";
+import type { AuditEntry } from "./audit/audit-log.js";
 import { ValidationError } from "./validation/rules.js";
 import type { EdgeType, NodeType } from "./types/graph.js";
 import { buildSchemaResponse } from "./schema.js";
@@ -14,6 +18,11 @@ import { FRAMEWORKS_BY_LANGUAGE, suggestFrameworks, suggestStack } from "./init/
 import { applyWizardAnswers, type WizardAnswers } from "./init/wizard.js";
 import { getAffectedNodes, getDependencies, getDependents } from "./analysis/dependencies.js";
 import { analyzeChange, planChange, type ChangeType } from "./analysis/change.js";
+import { importProject, type ImportCandidateEdge, type ImportCandidateNode } from "./analysis/import.js";
+import { detectConflicts } from "./analysis/sync-report.js";
+import { summarizeProject } from "./analysis/summary.js";
+import { searchGraph } from "./analysis/search.js";
+import { getProjectContext } from "./analysis/context.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -34,9 +43,66 @@ function withHistoryErrors(res: Response, fn: () => void): void {
   }
 }
 
-export function createServer(store: ProjectStore): express.Express {
+export interface CreateServerOptions {
+  /** Undefined means local mode (today's default): no auth required. */
+  authToken?: string;
+  /** Mounted only when explicitly requested — local, loopback-only usage sees no behavior change. */
+  enableRateLimit?: boolean;
+  /**
+   * Fixed role for every request this server instance accepts — this is a seam for Fase 16
+   * (`src/security/permissions.ts`), not a multi-user system: today's CLI has a single `--token`,
+   * so there's exactly one identity per running server, not a per-token table yet.
+   * Ignored (always "owner") when no authToken is set — local mode keeps full access, no regression.
+   */
+  role?: Role;
+}
+
+// Logs every request (reads included, not just mutations) — mounted before the routes so
+// res.on("finish") always has a chance to fire regardless of which handler ends up running.
+// Records after the response is sent, so it never adds latency to the request itself.
+function auditMiddleware(store: ProjectStore, identity: { role?: Role } | undefined) {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    const start = Date.now();
+    res.on("finish", () => {
+      const result: AuditEntry["result"] = res.statusCode === 409 ? "CONFLICT" : res.statusCode < 400 ? "SUCCESS" : "FAILURE";
+      const nodeId = req.params.id;
+      const target = nodeId ? { nodeId, nodeType: store.getNode(nodeId)?.type } : undefined;
+      store.recordAudit({
+        transport: "http",
+        operation: `${req.method} ${req.route?.path ?? req.path}`,
+        identity,
+        target,
+        result,
+        durationMs: Date.now() - start,
+      });
+    });
+    next();
+  };
+}
+
+function authorizationMiddleware(role: Role) {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    const action: PermissionAction = req.method === "GET" || req.method === "HEAD" ? "read" : "write";
+    if (!canPerform(role, action)) {
+      res.status(403).json({ error: "forbidden" });
+      return;
+    }
+    next();
+  };
+}
+
+export function createServer(store: ProjectStore, opts: CreateServerOptions = {}): express.Express {
   const app = express();
-  app.use(express.json());
+  const effectiveRole = opts.authToken ? (opts.role ?? "owner") : "owner";
+  app.use(authMiddleware(opts.authToken));
+  app.use(authorizationMiddleware(effectiveRole));
+  app.use(auditMiddleware(store, opts.authToken ? { role: effectiveRole } : undefined));
+  if (opts.enableRateLimit) {
+    app.use(rateLimit({ windowMs: 60_000, limit: 300, standardHeaders: true, legacyHeaders: false }));
+  }
+  // Bumped from body-parser's 100kb default — a bulk import/batch of a few hundred nodes can
+  // exceed that on its own, well before anything resembling an attack payload.
+  app.use(express.json({ limit: process.env.PROJECT_VISUALIZER_BODY_LIMIT ?? "5mb" }));
 
   app.get("/api/project", (req: Request, res: Response) => {
     const scope = (req.query.scope as "backend" | "frontend" | "all") ?? "all";
@@ -113,6 +179,14 @@ export function createServer(store: ProjectStore): express.Express {
     res.json(getAffectedNodes(req.params.id, store.getProject("all")));
   });
 
+  app.get("/api/nodes/:id/context", (req: Request, res: Response) => {
+    if (!store.getNode(req.params.id)) return res.status(404).json({ error: "not found" });
+    const depth = typeof req.query.depth === "string" ? Number(req.query.depth) : undefined;
+    const maxNodes = typeof req.query.maxNodes === "string" ? Number(req.query.maxNodes) : undefined;
+    const direction = req.query.direction as "dependencies" | "dependents" | "both" | undefined;
+    res.json(getProjectContext(store, req.params.id, { depth, direction, maxNodes }));
+  });
+
   app.post("/api/edges", (req: Request, res: Response) => {
     const { sourceId, targetId, edgeType } = req.body ?? {};
     if (typeof sourceId !== "string" || !store.getNode(sourceId)) {
@@ -140,6 +214,15 @@ export function createServer(store: ProjectStore): express.Express {
     }
     store.importGraph(nodes, edges, mode, { source: "import" });
     res.json({ imported: true });
+  });
+
+  app.post("/api/import-project", (req: Request, res: Response) => {
+    const { nodes, edges } = req.body ?? {};
+    if (!Array.isArray(nodes) || !Array.isArray(edges)) {
+      return res.status(400).json({ error: "nodes and edges must be arrays" });
+    }
+    const result = importProject(store, nodes as ImportCandidateNode[], (edges as ImportCandidateEdge[]) ?? [], { source: "import" });
+    res.json(result);
   });
 
   app.post("/api/batch", (req: Request, res: Response) => {
@@ -177,6 +260,18 @@ export function createServer(store: ProjectStore): express.Express {
     res.json(store.checkHealth());
   });
 
+  app.get("/api/analyze", (req: Request, res: Response) => {
+    const topN = typeof req.query.topN === "string" ? Number(req.query.topN) : undefined;
+    res.json(summarizeProject(store.getProject("all"), topN));
+  });
+
+  app.get("/api/search", (req: Request, res: Response) => {
+    const q = typeof req.query.q === "string" ? req.query.q : "";
+    const types = typeof req.query.types === "string" ? (req.query.types.split(",") as NodeType[]) : undefined;
+    const limit = typeof req.query.limit === "string" ? Number(req.query.limit) : undefined;
+    res.json(searchGraph(store.getProject("all"), q, { types, limit }));
+  });
+
   app.post("/api/nodes/:id/sync", (req: Request, res: Response) => {
     if (!store.getNode(req.params.id)) return res.status(404).json({ error: "not found" });
     const { sourceHash, sourcePath } = req.body ?? {};
@@ -185,7 +280,9 @@ export function createServer(store: ProjectStore): express.Express {
 
   app.get("/api/nodes/:id/sync-status", (req: Request, res: Response) => {
     if (!store.getNode(req.params.id)) return res.status(404).json({ error: "not found" });
-    const hash = typeof req.query.hash === "string" ? req.query.hash : undefined;
+    // Query params can't carry a JSON null — the literal string "null" is the documented sentinel
+    // for "checked, the file is gone" (vs. omitting ?hash entirely, meaning "not checked").
+    const hash = req.query.hash === "null" ? null : typeof req.query.hash === "string" ? req.query.hash : undefined;
     res.json({ status: store.getSyncStatus(req.params.id, hash) });
   });
 
@@ -194,7 +291,21 @@ export function createServer(store: ProjectStore): express.Express {
     if (typeof hashes !== "object" || hashes === null) {
       return res.status(400).json({ error: "hashes (object of nodeId -> hash) is required" });
     }
-    res.json(store.getBulkSyncStatus(hashes as Record<string, string>));
+    res.json(store.getBulkSyncStatus(hashes as Record<string, string | null>));
+  });
+
+  app.post("/api/detect-conflicts", (req: Request, res: Response) => {
+    const { hashes, scope } = req.body ?? {};
+    if (typeof hashes !== "object" || hashes === null) {
+      return res.status(400).json({ error: "hashes (object of nodeId -> hash|null) is required" });
+    }
+    res.json(detectConflicts(store, hashes as Record<string, string | null>, scope));
+  });
+
+  app.get("/api/audit-log", (req: Request, res: Response) => {
+    const limit = typeof req.query.limit === "string" ? Number(req.query.limit) : undefined;
+    const before = typeof req.query.before === "string" ? req.query.before : undefined;
+    res.json(store.listAuditLog({ limit, before }));
   });
 
   app.get("/api/history", (req: Request, res: Response) => {
@@ -296,20 +407,44 @@ export function createServer(store: ProjectStore): express.Express {
   return app;
 }
 
-export function startServer(store: ProjectStore, opts: { port: number; host?: string }): Server {
-  const app = createServer(store);
-  const server = createHttpServer(app);
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
+
+export interface StartServerOptions {
+  port: number;
+  host?: string;
+  authToken?: string;
+  /** Required to bind beyond loopback without an auth token — an explicit "I know what I'm doing". */
+  allowInsecureLan?: boolean;
+  role?: Role;
+}
+
+export function startServer(store: ProjectStore, opts: StartServerOptions): Server {
   const host = opts.host ?? "127.0.0.1";
+  const isLoopback = LOOPBACK_HOSTS.has(host);
+  if (!isLoopback && !opts.authToken && !opts.allowInsecureLan) {
+    throw new Error(
+      `Refusing to bind to ${host} without authentication: this would expose the API (no auth) beyond ` +
+        `localhost. Pass --token <token> to require authentication, or --allow-insecure-lan to bind anyway at your own risk.`,
+    );
+  }
+  const enableRateLimit = Boolean(opts.authToken) || !isLoopback;
+  const app = createServer(store, { authToken: opts.authToken, enableRateLimit, role: opts.role });
+  const server = createHttpServer(app);
   server.listen(opts.port, host, () => {
     console.error(`project-visualizer listening on http://localhost:${opts.port}`);
-    if (host === "0.0.0.0") {
+    if (!isLoopback) {
       // Only look up (and advertise) the LAN address when the caller explicitly opted into
-      // exposing the server beyond localhost — there is no authentication on this API.
+      // exposing the server beyond localhost.
       const nets = networkInterfaces();
       const lan = Object.values(nets)
         .flat()
         .find((net) => net && net.family === "IPv4" && !net.internal)?.address;
-      if (lan) console.error(`  also available on http://${lan}:${opts.port} (no auth — only expose on trusted networks)`);
+      if (lan) {
+        console.error(
+          `  also available on http://${lan}:${opts.port}` +
+            (opts.authToken ? " (token required)" : " (no auth — only expose on trusted networks)"),
+        );
+      }
     }
   });
   return server;

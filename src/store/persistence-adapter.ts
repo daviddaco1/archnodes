@@ -2,6 +2,7 @@ import { mkdirSync, existsSync, readFileSync, writeFileSync, renameSync, unlinkS
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ProjectGraph } from "../types/graph.js";
+import { assertValidProjectName } from "../security/project-name.js";
 
 // Everything project-store.ts needs to persist/load/lock/snapshot the graph, extracted behind an
 // interface so a future backend (SQLite, etc.) can implement the same contract without touching
@@ -23,6 +24,9 @@ function now(): string {
 }
 
 export function projectPath(projectName: string, baseDir?: string): string {
+  // Defense in depth: createProjectStore() already validates this before ever reaching the
+  // adapter, but any future direct caller of the adapter gets the same guarantee for free.
+  assertValidProjectName(projectName);
   const root = baseDir ?? join(homedir(), ".project-visualizer", "projects");
   return join(root, projectName, "project.json");
 }

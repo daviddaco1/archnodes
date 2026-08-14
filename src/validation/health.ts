@@ -1,4 +1,4 @@
-import { getDependents } from "../analysis/dependencies.js";
+import { buildDependentsIndex, getDependents } from "../analysis/dependencies.js";
 import type { NodeType, ProjectGraph } from "../types/graph.js";
 import { HIERARCHY_RULES, REF_FIELDS, collectRefValues, validateProjectGraph, type ValidationIssue } from "./rules.js";
 
@@ -55,10 +55,13 @@ export function findOrphanNodes(graph: ProjectGraph): ValidationIssue[] {
 const UNUSED_CHECK_TYPES = new Set<NodeType>(["service", "model", "table", "component"]);
 
 export function findUnusedNodes(graph: ProjectGraph): ValidationIssue[] {
+  // Built once and reused across every candidate below — calling getDependents() in a loop
+  // without this turns this function O(nodes²) (each call was its own O(nodes) scan).
+  const index = buildDependentsIndex(graph);
   const issues: ValidationIssue[] = [];
   for (const node of graph.nodes) {
     if (!UNUSED_CHECK_TYPES.has(node.type)) continue;
-    if (getDependents(node.id, graph).length === 0) {
+    if (getDependents(node.id, graph, index).length === 0) {
       issues.push({
         level: "warning",
         code: "UNUSED_NODE",

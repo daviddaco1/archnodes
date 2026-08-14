@@ -22,6 +22,9 @@ export interface HistoryEntry {
   operation: string;
   source: HistorySource;
   author?: string;
+  // Kept as a plain string here (not importing security/permissions' Role) — history.ts has no
+  // other dependency on the security module, and this is just an audit-trail label.
+  role?: string;
   description?: string;
   nodesDiff: NodeDiffEntry[];
   edgesDiff: EdgeDiffEntry[];

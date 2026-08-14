@@ -45,4 +45,19 @@ describe("determineSyncStatus", () => {
     const node = mkNode({ sourceHash: "abc", lastSyncedAt: "2024-01-02T00:00:00.000Z", updatedAt: "2024-01-03T00:00:00.000Z" });
     expect(determineSyncStatus(node, "different-hash")).toBe("conflict");
   });
+
+  it("is code_deleted when currentHash is explicitly null and the node has a sourcePath", () => {
+    const node = mkNode({ sourcePath: "src/domains/auth.ts", sourceHash: "abc", lastSyncedAt: "2024-01-01T00:00:00.000Z" });
+    expect(determineSyncStatus(node, null)).toBe("code_deleted");
+  });
+
+  it("is unknown (not code_deleted) when currentHash is null but the node has no sourcePath", () => {
+    const node = mkNode({});
+    expect(determineSyncStatus(node, null)).toBe("unknown");
+  });
+
+  it("omitting currentHash (undefined) still means 'not checked', not code_deleted", () => {
+    const node = mkNode({ sourcePath: "src/domains/auth.ts", sourceHash: "abc" });
+    expect(determineSyncStatus(node, undefined)).toBe("unknown");
+  });
 });

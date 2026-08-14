@@ -5,6 +5,7 @@ import { useGraph } from "../../context/GraphContext";
 
 export interface NoteNodeData {
   props: { text?: string; color?: "yellow" | "blue" | "pink" | "green" };
+  dimmed?: boolean;
   [key: string]: unknown;
 }
 
@@ -30,6 +31,9 @@ export function NoteNode({ data, id }: NodeProps & { data: NoteNodeData }) {
         borderRadius: "var(--radius-md)",
         boxShadow: "var(--shadow-soft)",
         padding: 10,
+        opacity: data.dimmed ? 0.15 : 1,
+        pointerEvents: data.dimmed ? "none" : undefined,
+        transition: "opacity 0.12s ease",
       }}
     >
       <textarea
