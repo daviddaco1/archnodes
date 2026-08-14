@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import { nodeSchemas } from "../../schema/nodeSchemas";
 import { CHAIN_INPUT_HANDLE } from "./refEdges";
-import type { NodeType } from "../../types/graph";
+import type { NodeType } from "@project-visualizer/shared/graph.js";
 import styles from "./GenericNode.module.css";
 
 export interface RefInputPortData {

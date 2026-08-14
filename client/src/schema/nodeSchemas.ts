@@ -1,4 +1,4 @@
-import type { NodeType } from "../types/graph";
+import type { NodeType } from "@project-visualizer/shared/graph.js";
 import type { FieldDef, NodeTypeSchema } from "./fieldTypes";
 
 // Shared item schemas so query/params/body/headers/returns don't repeat their shape 4-5 times.

@@ -1,4 +1,4 @@
-import type { AnyGraphNode, NodeType } from "../types/graph";
+import type { AnyGraphNode, NodeType } from "@project-visualizer/shared/graph.js";
 
 // Best-effort default props for one-click companion creation from PropertyPanel suggestions.
 // Only covers the companion types nodeSchemas actually suggests — this is a UI convenience,

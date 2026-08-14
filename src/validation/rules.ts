@@ -125,7 +125,7 @@ export const SPECIAL_EDGES: Record<"invalidates", { from: NodeType[]; to: NodeTy
 };
 
 export interface ValidationIssue {
-  level: "error" | "warning";
+  level: "error" | "warning" | "info";
   code:
     | "BROKEN_REF"
     | "MISSING_FIELD"
@@ -134,7 +134,11 @@ export interface ValidationIssue {
     | "INVALID_EDGE"
     | "INVALID_OPERATION_METHOD"
     | "DUPLICATE_OPERATION_METHOD"
-    | "CYCLE_DETECTED";
+    | "CYCLE_DETECTED"
+    | "INVALID_BATCH_OPERATION"
+    | "ORPHAN_NODE"
+    | "UNUSED_NODE"
+    | "REF_CYCLE";
   nodeId?: string;
   edgeId?: string;
   field?: string;
@@ -215,7 +219,7 @@ export function validateHierarchy(nodes: AnyGraphNode[], edges: GraphEdge[]): Va
   return issues;
 }
 
-function collectRefValues(props: Record<string, unknown>, spec: RefFieldSpec): string[] {
+export function collectRefValues(props: Record<string, unknown>, spec: RefFieldSpec): string[] {
   if (!spec.array) {
     const value = getByPath(props, spec.field);
     return typeof value === "string" && value ? [value] : [];

@@ -1,5 +1,5 @@
 import type { SchemaConnection } from "../../api/client";
-import type { EdgeType, NodeType } from "../../types/graph";
+import type { EdgeType, NodeType } from "@project-visualizer/shared/graph.js";
 
 export type ConnectionRules = Map<string, EdgeType>;
 

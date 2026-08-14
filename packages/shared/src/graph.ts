@@ -1,7 +1,3 @@
-// Copia manual de src/types/graph.ts (backend). Mantener sincronizado a mano.
-// No hay paquete/workspace compartido: el backend y este cliente viven en repos/procesos separados
-// y este archivo es solo ~350 lineas, asi que la duplicacion es mas simple que montar infra de monorepo.
-
 export type BackendNodeType =
   | "domain" | "subdomain" | "route" | "endpoint" | "operation" | "middleware" | "service"
   | "model" | "table" | "db" | "orm" | "repository" | "tool" | "queue"
@@ -43,6 +39,12 @@ export interface BaseNode {
   generated?: boolean;
   createdAt: string;
   updatedAt: string;
+  // Conflict detection (see src/sync/conflict.ts): which source file this node corresponds to,
+  // and the hash of that file's content the last time an agent synced it. The server never reads
+  // the user's filesystem itself — the syncing agent computes and sends the hash.
+  sourcePath?: string;
+  sourceHash?: string;
+  lastSyncedAt?: string;
 }
 
 // ---- Backend props ----

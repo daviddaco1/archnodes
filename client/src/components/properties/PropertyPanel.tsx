@@ -4,7 +4,7 @@ import { nodeSchemas } from "../../schema/nodeSchemas";
 import { defaultCompanionProps } from "../../schema/companionDefaults";
 import { edgeKind } from "../canvas/edgeValidation";
 import * as api from "../../api/client";
-import type { AnyGraphNode, GraphEdge, MiddlewareProps, NodeType, ServiceProps, SubdomainProps } from "../../types/graph";
+import type { AnyGraphNode, GraphEdge, MiddlewareProps, NodeType, ServiceProps, SubdomainProps } from "@project-visualizer/shared/graph.js";
 import { PropertyForm } from "./PropertyForm";
 import styles from "./PropertyPanel.module.css";
 

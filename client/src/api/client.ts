@@ -1,4 +1,4 @@
-import type { AnyGraphNode, EdgeType, GraphEdge, NodeType, ProjectGraph } from "../types/graph";
+import type { AnyGraphNode, EdgeType, GraphEdge, NodeType, ProjectGraph } from "@project-visualizer/shared/graph.js";
 
 export interface SchemaConnection {
   from: NodeType;

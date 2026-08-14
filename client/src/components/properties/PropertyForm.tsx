@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { nodeSchemas } from "../../schema/nodeSchemas";
-import type { AnyGraphNode, ModelField, TableColumn } from "../../types/graph";
+import type { AnyGraphNode, ModelField, TableColumn } from "@project-visualizer/shared/graph.js";
 import { FieldRenderer } from "./FieldRenderer";
 import { useGraph } from "../../context/GraphContext";
 import * as api from "../../api/client";

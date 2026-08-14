@@ -23,7 +23,16 @@ const EXPECTED_TOOLS = [
   "get_project",
   "list_nodes",
   "get_node",
+  "get_dependencies",
+  "get_dependents",
+  "get_affected_nodes",
   "validate_project",
+  "analyze_change",
+  "plan_change",
+  "analyze_health",
+  "record_sync",
+  "get_sync_status",
+  "get_bulk_sync_status",
   "create_node",
   "update_node",
   "set_position",
@@ -33,6 +42,12 @@ const EXPECTED_TOOLS = [
   "delete_edge",
   "import_graph",
   "export_markdown",
+  "batch_operations",
+  "undo",
+  "redo",
+  "list_history",
+  "restore_version",
+  "compare_versions",
 ];
 
 describe("createMcpServer", () => {
@@ -84,6 +99,25 @@ describe("createMcpServer", () => {
     expect(created.isError).toBeFalsy();
     const node = JSON.parse(created.content[0].text);
     expect(store.getNode(node.id)).toBeTruthy();
+  });
+
+  it("tags history entries with source: mcp for MCP-driven mutations", async () => {
+    const server = createMcpServer(store);
+    const tools = (server as unknown as { _registeredTools: Record<string, { handler: (args: unknown, extra: unknown) => Promise<{ content: { text: string }[] }> }> })._registeredTools;
+    await tools.create_node.handler({ type: "domain", props: { name: "Auth" } }, {});
+    expect(store.listHistory()[0].source).toBe("mcp");
+  });
+
+  it("record_sync / get_sync_status round-trip through the store", async () => {
+    const server = createMcpServer(store);
+    const tools = (server as unknown as { _registeredTools: Record<string, { handler: (args: unknown, extra: unknown) => Promise<{ content: { text: string }[]; isError?: boolean }> }> })._registeredTools;
+    const domain = JSON.parse((await tools.create_node.handler({ type: "domain", props: { name: "Auth" } }, {})).content[0].text);
+
+    const synced = await tools.record_sync.handler({ id: domain.id, sourceHash: "abc123" }, {});
+    expect(synced.isError).toBeFalsy();
+
+    const status = JSON.parse((await tools.get_sync_status.handler({ id: domain.id, currentHash: "abc123" }, {})).content[0].text);
+    expect(status.status).toBe("in_sync");
   });
 
   it("get_node returns a proper error (not a stringified undefined) for a missing id", async () => {

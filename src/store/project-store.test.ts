@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -361,5 +361,238 @@ describe("snapshot before destructive bulk writes", () => {
     localStore.deleteNode(domain.id, true); // domain + 6 nested routes — above the threshold
 
     expect(existsSync(snapshotDir)).toBe(true);
+  });
+});
+
+describe("transaction", () => {
+  it("defers persistence until commit — mid-transaction, disk still reflects the pre-transaction state", () => {
+    const projectName = `test-${randomUUID()}`;
+    const localStore = createProjectStore(projectName, { baseDir });
+    localStore.updateManifest({}); // force an initial persist so project.json exists on disk
+    const projectFile = join(baseDir, projectName, "project.json");
+
+    let midTxNodeCount = -1;
+    localStore.transaction((tx) => {
+      tx.createNode("domain", { name: "Auth" });
+      tx.createNode("domain", { name: "Billing" });
+      midTxNodeCount = (JSON.parse(readFileSync(projectFile, "utf-8")) as { nodes: unknown[] }).nodes.length;
+    });
+
+    expect(midTxNodeCount).toBe(0);
+    const final = JSON.parse(readFileSync(projectFile, "utf-8")) as { nodes: unknown[] };
+    expect(final.nodes).toHaveLength(2);
+  });
+
+  it("rolls back in memory and never touches disk if an operation inside fails", () => {
+    const projectName = `test-${randomUUID()}`;
+    const localStore = createProjectStore(projectName, { baseDir });
+    localStore.updateManifest({}); // force an initial persist so project.json exists on disk
+    const projectFile = join(baseDir, projectName, "project.json");
+    const before = readFileSync(projectFile, "utf-8");
+
+    expect(() =>
+      localStore.transaction((tx) => {
+        tx.createNode("domain", { name: "Auth" });
+        tx.createNode("endpoint", { name: "x", methods: ["GET"] }, "not-a-real-parent-id"); // throws
+      }),
+    ).toThrow(ValidationError);
+
+    expect(readFileSync(projectFile, "utf-8")).toBe(before);
+    expect(localStore.getProject("all").nodes).toHaveLength(0);
+  });
+
+  it("does not double-commit a nested transaction — the outer call owns commit/rollback", () => {
+    const projectName = `test-${randomUUID()}`;
+    const localStore = createProjectStore(projectName, { baseDir });
+    const projectFile = join(baseDir, projectName, "project.json");
+
+    localStore.transaction((tx) => {
+      tx.createNode("domain", { name: "Auth" });
+      tx.transaction((inner) => {
+        inner.createNode("domain", { name: "Billing" });
+      });
+    });
+
+    const final = JSON.parse(readFileSync(projectFile, "utf-8")) as { nodes: unknown[] };
+    expect(final.nodes).toHaveLength(2);
+  });
+});
+
+describe("applyBatch", () => {
+  it("rejects a method outside the whitelist before mutating anything", () => {
+    const projectName = `test-${randomUUID()}`;
+    const localStore = createProjectStore(projectName, { baseDir });
+
+    expect(() =>
+      localStore.applyBatch([{ method: "validateProject" as never, args: [] }]),
+    ).toThrow(ValidationError);
+    expect(localStore.getProject("all").nodes).toHaveLength(0);
+  });
+
+  it("commits every operation together, in order, as a single transaction", () => {
+    const projectName = `test-${randomUUID()}`;
+    const localStore = createProjectStore(projectName, { baseDir });
+
+    const results = localStore.applyBatch([
+      { method: "createNode", args: ["domain", { name: "Auth" }] },
+      { method: "createNode", args: ["route", { path: "/login" }] },
+    ]);
+
+    expect(results).toHaveLength(2);
+    const [domain, route] = results as [{ id: string }, { id: string }];
+    localStore.connectNodes(domain.id, route.id);
+    expect(localStore.getNode(route.id)?.parentId).toBe(domain.id);
+  });
+
+  it("rolls back every operation if one fails partway through", () => {
+    const projectName = `test-${randomUUID()}`;
+    const localStore = createProjectStore(projectName, { baseDir });
+    localStore.updateManifest({}); // force an initial persist so project.json exists on disk
+    const projectFile = join(baseDir, projectName, "project.json");
+    const before = readFileSync(projectFile, "utf-8");
+
+    expect(() =>
+      localStore.applyBatch([
+        { method: "createNode", args: ["domain", { name: "Auth" }] },
+        { method: "createNode", args: ["endpoint", { name: "x", methods: ["GET"] }, "not-a-real-parent-id"] },
+      ]),
+    ).toThrow(ValidationError);
+
+    expect(readFileSync(projectFile, "utf-8")).toBe(before);
+    expect(localStore.getProject("all").nodes).toHaveLength(0);
+  });
+});
+
+describe("PersistenceAdapter injection", () => {
+  it("works entirely against an in-memory fake adapter — the store makes no filesystem assumptions", () => {
+    let saved: unknown = null;
+    let snapshotCount = 0;
+    const fakeAdapter = {
+      load: () => ({
+        manifest: { projectName: "fake", createdAt: "2024-01-01T00:00:00.000Z", updatedAt: "2024-01-01T00:00:00.000Z" },
+        nodes: [],
+        edges: [],
+      }),
+      save: (graph: unknown) => {
+        saved = graph;
+      },
+      acquireLock: () => {},
+      releaseLock: () => {},
+      snapshot: () => {
+        snapshotCount += 1;
+      },
+    };
+
+    // baseDir is still passed so the (unrelated, filesystem-based) history log lands in the test's
+    // tmp dir rather than the real ~/.project-visualizer — only graph storage itself is faked here.
+    const memStore = createProjectStore("fake", { baseDir, persistence: fakeAdapter });
+    const domain = memStore.createNode("domain", { name: "Auth" });
+    expect((saved as { nodes: unknown[] }).nodes).toHaveLength(1);
+    expect(memStore.getNode(domain.id)).toBeTruthy();
+
+    memStore.importGraph([], [], "replace"); // exercises the snapshot() hook
+    expect(snapshotCount).toBe(1);
+  });
+});
+
+describe("recordSync / getSyncStatus / getBulkSyncStatus", () => {
+  it("stamps sourceHash/sourcePath/lastSyncedAt without bumping updatedAt", () => {
+    const node = store.createNode("domain", { name: "Auth" });
+    const before = store.getNode(node.id)!.updatedAt;
+    const synced = store.recordSync(node.id, { sourceHash: "abc123", sourcePath: "src/domains/auth.ts" });
+    expect(synced.sourceHash).toBe("abc123");
+    expect(synced.sourcePath).toBe("src/domains/auth.ts");
+    expect(synced.lastSyncedAt).toBeTruthy();
+    expect(synced.updatedAt).toBe(before);
+  });
+
+  it("getSyncStatus reflects in_sync right after a sync, then graph_changed after a later edit", () => {
+    const node = store.createNode("domain", { name: "Auth" });
+    store.recordSync(node.id, { sourceHash: "abc123" });
+    expect(store.getSyncStatus(node.id, "abc123")).toBe("in_sync");
+
+    store.updateNode(node.id, { name: "AuthRenamed" });
+    expect(store.getSyncStatus(node.id, "abc123")).toBe("graph_changed");
+  });
+
+  it("getBulkSyncStatus reports per-node status across the whole project in one call", () => {
+    const a = store.createNode("domain", { name: "Auth" });
+    const b = store.createNode("domain", { name: "Billing" });
+    store.recordSync(a.id, { sourceHash: "hashA" });
+    const statuses = store.getBulkSyncStatus({ [a.id]: "hashA", [b.id]: "hashB" });
+    expect(statuses[a.id]).toBe("in_sync");
+    expect(statuses[b.id]).toBe("unknown"); // b was never synced
+  });
+});
+
+describe("history / undo / redo / restore", () => {
+  it("records one entry per committed transaction, tagged with the given source", () => {
+    store.createNode("domain", { name: "Auth" }, undefined, { source: "import" });
+    store.createNode("route", { path: "/login" }, undefined, { source: "ui" });
+    const history = store.listHistory();
+    expect(history).toHaveLength(2);
+    expect(history[0].source).toBe("import");
+    expect(history[0].operation).toBe("createNode");
+    expect(history[1].source).toBe("ui");
+  });
+
+  it("undo() reverts the most recent entry; redo() re-applies it", () => {
+    const domain = store.createNode("domain", { name: "Auth" });
+    store.undo();
+    expect(store.getNode(domain.id)).toBeUndefined();
+    store.redo();
+    expect(store.getNode(domain.id)).toBeTruthy();
+  });
+
+  it("undo() throws when there is nothing to undo, redo() throws when there is nothing to redo", () => {
+    expect(() => store.undo()).toThrow(/nothing to undo/i);
+    store.createNode("domain", { name: "Auth" });
+    expect(() => store.redo()).toThrow(/nothing to redo/i);
+  });
+
+  it("a fresh commit after undo() drops the redo-able future", () => {
+    const a = store.createNode("domain", { name: "Auth" });
+    store.createNode("domain", { name: "Billing" });
+    store.undo(); // back to just `a`
+    store.createNode("domain", { name: "Support" }); // new branch — "Billing" redo is gone
+    expect(() => store.redo()).toThrow(/nothing to redo/i);
+    expect(store.getNode(a.id)).toBeTruthy();
+    expect(store.listNodes("domain").map((n) => (n.props as { name: string }).name).sort()).toEqual(["Auth", "Support"]);
+  });
+
+  it("a whole batch commits as exactly one history entry", () => {
+    store.applyBatch([
+      { method: "createNode", args: ["domain", { name: "Auth" }] },
+      { method: "createNode", args: ["route", { path: "/login" }] },
+    ]);
+    const history = store.listHistory();
+    expect(history).toHaveLength(1);
+    expect(history[0].operation).toBe("applyBatch");
+    expect(history[0].nodesDiff).toHaveLength(2);
+  });
+
+  it("restoreVersion() moves the graph to the state right after that entry was applied", () => {
+    store.createNode("domain", { name: "Auth" });
+    const billing = store.createNode("domain", { name: "Billing" });
+    store.createNode("domain", { name: "Support" });
+    const history = store.listHistory();
+
+    store.restoreVersion(history[0].id); // right after "Auth" alone was created
+    expect(store.listNodes("domain")).toHaveLength(1);
+
+    store.restoreVersion(history[2].id); // forward again, to the full state
+    expect(store.listNodes("domain")).toHaveLength(3);
+    expect(store.getNode(billing.id)).toBeTruthy();
+  });
+
+  it("compareVersions() diffs two points in the timeline without mutating the live graph", () => {
+    store.createNode("domain", { name: "Auth" });
+    const billing = store.createNode("domain", { name: "Billing" });
+    const history = store.listHistory();
+
+    const diff = store.compareVersions(history[0].id, history[1].id);
+    expect(diff.nodesDiff.some((d) => d.id === billing.id && d.before === undefined && d.after)).toBe(true);
+    // compareVersions must not have touched the real, live graph
+    expect(store.listNodes("domain")).toHaveLength(2);
   });
 });

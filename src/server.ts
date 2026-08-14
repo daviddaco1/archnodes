@@ -4,7 +4,7 @@ import { networkInterfaces } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
-import type { ProjectStore } from "./store/project-store.js";
+import type { BatchOp, ProjectStore } from "./store/project-store.js";
 import { ValidationError } from "./validation/rules.js";
 import type { EdgeType, NodeType } from "./types/graph.js";
 import { buildSchemaResponse } from "./schema.js";
@@ -12,8 +12,27 @@ import { exportMarkdown } from "./export/markdown.js";
 import { TEMPLATES, applyTemplate } from "./init/templates.js";
 import { FRAMEWORKS_BY_LANGUAGE, suggestFrameworks, suggestStack } from "./init/suggestions.js";
 import { applyWizardAnswers, type WizardAnswers } from "./init/wizard.js";
+import { getAffectedNodes, getDependencies, getDependents } from "./analysis/dependencies.js";
+import { analyzeChange, planChange, type ChangeType } from "./analysis/change.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// store.undo()/redo()/restoreVersion()/compareVersions() throw plain Errors (not ValidationError,
+// since there's no graph-validation issue involved) for "nothing to undo/redo" and "entry not
+// found" — map those to the right 4xx status instead of falling through to the generic 500 handler.
+function withHistoryErrors(res: Response, fn: () => void): void {
+  try {
+    fn();
+  } catch (err) {
+    if (err instanceof Error && /nothing to (undo|redo)/i.test(err.message)) {
+      res.status(400).json({ error: err.message });
+    } else if (err instanceof Error && /not found/i.test(err.message)) {
+      res.status(404).json({ error: err.message });
+    } else {
+      throw err;
+    }
+  }
+}
 
 export function createServer(store: ProjectStore): express.Express {
   const app = express();
@@ -52,7 +71,7 @@ export function createServer(store: ProjectStore): express.Express {
     if (typeof type !== "string" || typeof props !== "object" || props === null) {
       return res.status(400).json({ error: "type (string) and props (object) are required" });
     }
-    const node = store.createNode(type as NodeType, props, parentId);
+    const node = store.createNode(type as NodeType, props, parentId, { source: "api" });
     res.status(201).json(node);
   });
 
@@ -60,14 +79,14 @@ export function createServer(store: ProjectStore): express.Express {
     const body = req.body ?? {};
     let node = store.getNode(req.params.id);
     if (!node) return res.status(404).json({ error: "not found" });
-    if (body.position !== undefined) node = store.setPosition(req.params.id, body.position);
-    if (body.containerId !== undefined) node = store.setContainer(req.params.id, body.containerId || undefined);
+    if (body.position !== undefined) node = store.setPosition(req.params.id, body.position, { source: "api" });
+    if (body.containerId !== undefined) node = store.setContainer(req.params.id, body.containerId || undefined, { source: "api" });
     // Props can arrive wrapped ({props: {...}}) or as flat extra keys alongside position/containerId —
     // either way, any leftover data key must still reach updateNode, not just when position/containerId are absent.
     const { position: _position, containerId: _containerId, props, ...rest } = body;
     const propsPatch = props !== undefined ? props : rest;
     if (Object.keys(propsPatch).length > 0) {
-      node = store.updateNode(req.params.id, propsPatch);
+      node = store.updateNode(req.params.id, propsPatch, { source: "api" });
     }
     res.json(node);
   });
@@ -75,8 +94,23 @@ export function createServer(store: ProjectStore): express.Express {
   app.delete("/api/nodes/:id", (req: Request, res: Response) => {
     if (!store.getNode(req.params.id)) return res.status(404).json({ error: "not found" });
     const cascade = req.query.cascade === "true";
-    const result = store.deleteNode(req.params.id, cascade);
+    const result = store.deleteNode(req.params.id, cascade, { source: "api" });
     res.json(result);
+  });
+
+  app.get("/api/nodes/:id/dependencies", (req: Request, res: Response) => {
+    if (!store.getNode(req.params.id)) return res.status(404).json({ error: "not found" });
+    res.json(getDependencies(req.params.id, store.getProject("all")));
+  });
+
+  app.get("/api/nodes/:id/dependents", (req: Request, res: Response) => {
+    if (!store.getNode(req.params.id)) return res.status(404).json({ error: "not found" });
+    res.json(getDependents(req.params.id, store.getProject("all")));
+  });
+
+  app.get("/api/nodes/:id/affected", (req: Request, res: Response) => {
+    if (!store.getNode(req.params.id)) return res.status(404).json({ error: "not found" });
+    res.json(getAffectedNodes(req.params.id, store.getProject("all")));
   });
 
   app.post("/api/edges", (req: Request, res: Response) => {
@@ -87,12 +121,12 @@ export function createServer(store: ProjectStore): express.Express {
     if (typeof targetId !== "string" || !store.getNode(targetId)) {
       return res.status(404).json({ error: "target node not found" });
     }
-    const edge = store.connectNodes(sourceId, targetId, edgeType as EdgeType | undefined);
+    const edge = store.connectNodes(sourceId, targetId, edgeType as EdgeType | undefined, { source: "api" });
     res.status(201).json(edge);
   });
 
   app.delete("/api/edges/:id", (req: Request, res: Response) => {
-    store.deleteEdge(req.params.id);
+    store.deleteEdge(req.params.id, { source: "api" });
     res.status(204).end();
   });
 
@@ -104,12 +138,89 @@ export function createServer(store: ProjectStore): express.Express {
     if (!Array.isArray(nodes) || !Array.isArray(edges)) {
       return res.status(400).json({ error: "nodes and edges must be arrays" });
     }
-    store.importGraph(nodes, edges, mode);
+    store.importGraph(nodes, edges, mode, { source: "import" });
     res.json({ imported: true });
+  });
+
+  app.post("/api/batch", (req: Request, res: Response) => {
+    const { operations } = req.body ?? {};
+    if (!Array.isArray(operations)) {
+      return res.status(400).json({ error: "operations must be an array" });
+    }
+    const results = store.applyBatch(operations as BatchOp[], { source: "api" });
+    res.json({ results });
   });
 
   app.get("/api/validate", (_req: Request, res: Response) => {
     res.json(store.validateProject());
+  });
+
+  app.post("/api/analyze-change", (req: Request, res: Response) => {
+    const { nodeId, changeType, propsPatch } = req.body ?? {};
+    if (typeof nodeId !== "string" || (changeType !== "delete" && changeType !== "modify")) {
+      return res.status(400).json({ error: 'nodeId (string) and changeType ("delete"|"modify") are required' });
+    }
+    if (!store.getNode(nodeId)) return res.status(404).json({ error: "not found" });
+    res.json(analyzeChange(store, nodeId, changeType as ChangeType, { propsPatch }));
+  });
+
+  app.post("/api/plan-change", (req: Request, res: Response) => {
+    const { nodeId, changeType, propsPatch } = req.body ?? {};
+    if (typeof nodeId !== "string" || (changeType !== "delete" && changeType !== "modify")) {
+      return res.status(400).json({ error: 'nodeId (string) and changeType ("delete"|"modify") are required' });
+    }
+    if (!store.getNode(nodeId)) return res.status(404).json({ error: "not found" });
+    res.json(planChange(store, nodeId, changeType as ChangeType, { propsPatch }));
+  });
+
+  app.get("/api/health", (_req: Request, res: Response) => {
+    res.json(store.checkHealth());
+  });
+
+  app.post("/api/nodes/:id/sync", (req: Request, res: Response) => {
+    if (!store.getNode(req.params.id)) return res.status(404).json({ error: "not found" });
+    const { sourceHash, sourcePath } = req.body ?? {};
+    res.json(store.recordSync(req.params.id, { sourceHash, sourcePath }, { source: "sync" }));
+  });
+
+  app.get("/api/nodes/:id/sync-status", (req: Request, res: Response) => {
+    if (!store.getNode(req.params.id)) return res.status(404).json({ error: "not found" });
+    const hash = typeof req.query.hash === "string" ? req.query.hash : undefined;
+    res.json({ status: store.getSyncStatus(req.params.id, hash) });
+  });
+
+  app.post("/api/sync-status", (req: Request, res: Response) => {
+    const { hashes } = req.body ?? {};
+    if (typeof hashes !== "object" || hashes === null) {
+      return res.status(400).json({ error: "hashes (object of nodeId -> hash) is required" });
+    }
+    res.json(store.getBulkSyncStatus(hashes as Record<string, string>));
+  });
+
+  app.get("/api/history", (req: Request, res: Response) => {
+    const limit = typeof req.query.limit === "string" ? Number(req.query.limit) : undefined;
+    const before = typeof req.query.before === "string" ? req.query.before : undefined;
+    res.json(store.listHistory({ limit, before }));
+  });
+
+  app.post("/api/history/undo", (_req: Request, res: Response) => {
+    withHistoryErrors(res, () => res.json(store.undo()));
+  });
+
+  app.post("/api/history/redo", (_req: Request, res: Response) => {
+    withHistoryErrors(res, () => res.json(store.redo()));
+  });
+
+  app.post("/api/history/:id/restore", (req: Request, res: Response) => {
+    withHistoryErrors(res, () => res.json(store.restoreVersion(req.params.id)));
+  });
+
+  app.get("/api/history/compare", (req: Request, res: Response) => {
+    const { a, b } = req.query;
+    if (typeof a !== "string" || typeof b !== "string") {
+      return res.status(400).json({ error: "query params a and b (history entry ids) are required" });
+    }
+    withHistoryErrors(res, () => res.json(store.compareVersions(a, b)));
   });
 
   app.get("/api/export/markdown", (req: Request, res: Response) => {

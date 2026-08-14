@@ -19,7 +19,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useGraph } from "../../context/GraphContext";
 import { nodeSchemas } from "../../schema/nodeSchemas";
 import { defaultCompanionProps } from "../../schema/companionDefaults";
-import type { AnyGraphNode, GraphEdge, NodeType } from "../../types/graph";
+import type { AnyGraphNode, GraphEdge, NodeType } from "@project-visualizer/shared/graph.js";
 import * as api from "../../api/client";
 import type { SchemaResponse } from "../../api/client";
 import { compatibleSources, compatibleTargets, edgeKind, type ConnectionRules } from "./edgeValidation";

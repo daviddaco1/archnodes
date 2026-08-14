@@ -315,4 +315,166 @@ describe("REST API", () => {
     expect(graph.manifest.framework).toBe("Express");
     expect(graph.nodes.some((n: { type: string }) => n.type === "domain")).toBe(true);
   });
+
+  it("commits a batch of operations as a single transaction", async () => {
+    const res = await fetch(`${baseUrl}/api/batch`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        operations: [
+          { method: "createNode", args: ["domain", { name: "Auth" }] },
+          { method: "createNode", args: ["route", { path: "/login" }] },
+        ],
+      }),
+    });
+    expect(res.status).toBe(200);
+    const { results } = await res.json();
+    expect(results).toHaveLength(2);
+  });
+
+  it("rolls back the whole batch (and never persists) if one operation fails", async () => {
+    const res = await fetch(`${baseUrl}/api/batch`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        operations: [
+          { method: "createNode", args: ["domain", { name: "Auth" }] },
+          { method: "createNode", args: ["endpoint", { name: "x", methods: ["GET"] }, "not-a-real-id"] },
+        ],
+      }),
+    });
+    expect(res.status).toBe(400);
+    const project = await fetch(`${baseUrl}/api/project`).then((r) => r.json());
+    expect(project.nodes).toHaveLength(0);
+  });
+
+  it("records history and supports undo/redo", async () => {
+    const created = await fetch(`${baseUrl}/api/nodes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "domain", props: { name: "Auth" } }),
+    }).then((r) => r.json());
+
+    const history = await fetch(`${baseUrl}/api/history`).then((r) => r.json());
+    expect(history).toHaveLength(1);
+
+    const undone = await fetch(`${baseUrl}/api/history/undo`, { method: "POST" });
+    expect(undone.status).toBe(200);
+    let node = await fetch(`${baseUrl}/api/nodes/${created.id}`);
+    expect(node.status).toBe(404);
+
+    const redone = await fetch(`${baseUrl}/api/history/redo`, { method: "POST" });
+    expect(redone.status).toBe(200);
+    node = await fetch(`${baseUrl}/api/nodes/${created.id}`);
+    expect(node.status).toBe(200);
+  });
+
+  it("returns 400 when there is nothing to undo", async () => {
+    const res = await fetch(`${baseUrl}/api/history/undo`, { method: "POST" });
+    expect(res.status).toBe(400);
+  });
+
+  it("exposes read-only change impact analysis and planning", async () => {
+    const domain = await fetch(`${baseUrl}/api/nodes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "domain", props: { name: "Auth" } }),
+    }).then((r) => r.json());
+    await fetch(`${baseUrl}/api/nodes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "route", props: { path: "/login" }, parentId: domain.id }),
+    });
+
+    const analysis = await fetch(`${baseUrl}/api/analyze-change`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ nodeId: domain.id, changeType: "delete" }),
+    }).then((r) => r.json());
+    expect(analysis.wouldCascade).toBe(true);
+
+    const plan = await fetch(`${baseUrl}/api/plan-change`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ nodeId: domain.id, changeType: "delete" }),
+    }).then((r) => r.json());
+    expect(plan.summary).toContain("cascade");
+
+    // read-only: the project must be unchanged after both calls
+    const project = await fetch(`${baseUrl}/api/project`).then((r) => r.json());
+    expect(project.nodes).toHaveLength(2);
+
+    expect((await fetch(`${baseUrl}/api/analyze-change`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ nodeId: "does-not-exist", changeType: "delete" }) })).status).toBe(404);
+  });
+
+  it("exposes conflict detection via record_sync / sync-status", async () => {
+    const domain = await fetch(`${baseUrl}/api/nodes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "domain", props: { name: "Auth" } }),
+    }).then((r) => r.json());
+
+    await fetch(`${baseUrl}/api/nodes/${domain.id}/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceHash: "abc123", sourcePath: "src/domains/auth.ts" }),
+    });
+
+    const status = await fetch(`${baseUrl}/api/nodes/${domain.id}/sync-status?hash=abc123`).then((r) => r.json());
+    expect(status.status).toBe("in_sync");
+
+    const bulk = await fetch(`${baseUrl}/api/sync-status`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ hashes: { [domain.id]: "different-hash" } }),
+    }).then((r) => r.json());
+    expect(bulk[domain.id]).toBe("code_changed");
+
+    expect((await fetch(`${baseUrl}/api/nodes/does-not-exist/sync-status`)).status).toBe(404);
+  });
+
+  it("tags history entries with source: api for REST-driven mutations", async () => {
+    await fetch(`${baseUrl}/api/nodes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "domain", props: { name: "Auth" } }),
+    });
+    const history = await fetch(`${baseUrl}/api/history`).then((r) => r.json());
+    expect(history[0].source).toBe("api");
+  });
+
+  it("exposes project health diagnostics separate from /api/validate", async () => {
+    await fetch(`${baseUrl}/api/nodes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "endpoint", props: { name: "x", methods: ["GET"] } }), // no parent, nothing refs it
+    });
+    const health = await fetch(`${baseUrl}/api/health`).then((r) => r.json());
+    expect(health.warnings.some((i: { code: string }) => i.code === "ORPHAN_NODE")).toBe(true);
+    expect(health.issues.length).toBe(health.errors.length + health.warnings.length + health.info.length);
+  });
+
+  it("exposes dependency analysis", async () => {
+    const domain = await fetch(`${baseUrl}/api/nodes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "domain", props: { name: "Auth" } }),
+    }).then((r) => r.json());
+    const route = await fetch(`${baseUrl}/api/nodes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "route", props: { path: "/login" }, parentId: domain.id }),
+    }).then((r) => r.json());
+
+    const deps = await fetch(`${baseUrl}/api/nodes/${route.id}/dependencies`).then((r) => r.json());
+    expect(deps).toContainEqual({ nodeId: domain.id, kind: "hierarchy-parent" });
+
+    const dependents = await fetch(`${baseUrl}/api/nodes/${domain.id}/dependents`).then((r) => r.json());
+    expect(dependents).toContainEqual({ nodeId: route.id, kind: "hierarchy-child" });
+
+    const affected = await fetch(`${baseUrl}/api/nodes/${domain.id}/affected`).then((r) => r.json());
+    expect(affected).toContainEqual({ nodeId: route.id, depth: 1, via: "hierarchy-child" });
+
+    expect((await fetch(`${baseUrl}/api/nodes/does-not-exist/dependencies`)).status).toBe(404);
+  });
 });

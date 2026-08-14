@@ -1,4 +1,4 @@
-import type { NodeType } from "../types/graph";
+import type { NodeType } from "@project-visualizer/shared/graph.js";
 
 export type FieldKind =
   | "text"

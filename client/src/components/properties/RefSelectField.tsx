@@ -1,7 +1,7 @@
 import { useGraph } from "../../context/GraphContext";
 import { nodeSchemas } from "../../schema/nodeSchemas";
 import { formatSummaryValue } from "../canvas/GenericNode";
-import type { AnyGraphNode } from "../../types/graph";
+import type { AnyGraphNode } from "@project-visualizer/shared/graph.js";
 import type { FieldDef } from "../../schema/fieldTypes";
 
 interface RefSelectFieldProps {

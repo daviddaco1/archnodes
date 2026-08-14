@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { getProject, getSchema, type SchemaResponse } from "../api/client";
-import type { AnyGraphNode, GraphEdge, ProjectManifest } from "../types/graph";
+import type { AnyGraphNode, GraphEdge, ProjectManifest } from "@project-visualizer/shared/graph.js";
 import { buildRuleMap, type ConnectionRules } from "../components/canvas/edgeValidation";
 import {
   buildArrayRefPorts,
@@ -9,7 +9,7 @@ import {
   type ArrayRefSpec,
   type RefPortRules,
 } from "../components/canvas/refEdges";
-import type { NodeType } from "../types/graph";
+import type { NodeType } from "@project-visualizer/shared/graph.js";
 
 interface GraphContextValue {
   nodes: AnyGraphNode[];

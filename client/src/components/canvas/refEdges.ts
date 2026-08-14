@@ -1,5 +1,5 @@
 import type { RefFieldSpec, SchemaResponse } from "../../api/client";
-import type { AnyGraphNode, NodeType } from "../../types/graph";
+import type { AnyGraphNode, NodeType } from "@project-visualizer/shared/graph.js";
 
 // Single-value ref fields (props.dbId, props.ormId, etc.) are a real relationship — the backend
 // already validates them (REF_FIELDS) — but until now they were only visible/editable as a
