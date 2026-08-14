@@ -21,61 +21,6 @@ import {
 const BACKEND_TYPE_SET = new Set<string>(BACKEND_NODE_TYPES);
 import { validateProjectGraph, type ValidationIssue, type ValidationResult } from "../validation/rules.js";
 
-// ---- YAML (manual emitter, no js-yaml — the input is always our own plain data) ----
-
-function formatScalar(value: unknown): string {
-  if (value === undefined || value === null) return "null";
-  if (typeof value === "string") return value;
-  return JSON.stringify(value);
-}
-
-function yamlLines(value: unknown, indent: number): string[] {
-  const pad = "  ".repeat(indent);
-  if (value === null || value === undefined) return [`${pad}null`];
-
-  if (Array.isArray(value)) {
-    if (value.length === 0) return [`${pad}[]`];
-    const lines: string[] = [];
-    for (const item of value) {
-      if (item !== null && typeof item === "object" && !Array.isArray(item)) {
-        Object.entries(item as Record<string, unknown>).forEach(([key, val], i) => {
-          const prefix = i === 0 ? `${pad}- ` : `${pad}  `;
-          if (val !== null && typeof val === "object") {
-            lines.push(`${prefix}${key}:`);
-            lines.push(...yamlLines(val, indent + 2));
-          } else {
-            lines.push(`${prefix}${key}: ${formatScalar(val)}`);
-          }
-        });
-      } else {
-        lines.push(`${pad}- ${formatScalar(item)}`);
-      }
-    }
-    return lines;
-  }
-
-  if (typeof value === "object") {
-    const entries = Object.entries(value as Record<string, unknown>);
-    if (entries.length === 0) return [`${pad}{}`];
-    const lines: string[] = [];
-    for (const [key, val] of entries) {
-      if (val !== null && typeof val === "object") {
-        lines.push(`${pad}${key}:`);
-        lines.push(...yamlLines(val, indent + 1));
-      } else {
-        lines.push(`${pad}${key}: ${formatScalar(val)}`);
-      }
-    }
-    return lines;
-  }
-
-  return [`${pad}${formatScalar(value)}`];
-}
-
-export function toYamlBlock(value: unknown, indent = 0): string {
-  return yamlLines(value, indent).join("\n") + "\n";
-}
-
 // ---- graph traversal helpers ----
 
 function hierarchyChildren(nodeId: string, edges: GraphEdge[], nodesById: Map<string, AnyGraphNode>): AnyGraphNode[] {
@@ -85,11 +30,16 @@ function hierarchyChildren(nodeId: string, edges: GraphEdge[], nodesById: Map<st
     .filter((n): n is AnyGraphNode => Boolean(n));
 }
 
+// The store rejects hierarchy cycles at write time, but this guards data written before that
+// check existed (or edited by hand) — without it a cycle would hang export forever.
 function collectDescendants(nodeId: string, edges: GraphEdge[], nodesById: Map<string, AnyGraphNode>): AnyGraphNode[] {
   const result: AnyGraphNode[] = [];
+  const visited = new Set<string>([nodeId]);
   const stack = [...hierarchyChildren(nodeId, edges, nodesById)];
   while (stack.length > 0) {
     const node = stack.shift()!;
+    if (visited.has(node.id)) continue;
+    visited.add(node.id);
     result.push(node);
     stack.push(...hierarchyChildren(node.id, edges, nodesById));
   }
@@ -98,8 +48,10 @@ function collectDescendants(nodeId: string, edges: GraphEdge[], nodesById: Map<s
 
 function computeFullPath(node: AnyGraphNode, nodesById: Map<string, AnyGraphNode>): string {
   const segments: string[] = [];
+  const visited = new Set<string>([node.id]);
   let current = node.parentId ? nodesById.get(node.parentId) : undefined;
-  while (current && current.type === "route") {
+  while (current && current.type === "route" && !visited.has(current.id)) {
+    visited.add(current.id);
     const path = (current.props as RouteProps).path;
     if (path) segments.unshift(path);
     current = current.parentId ? nodesById.get(current.parentId) : undefined;
@@ -274,14 +226,22 @@ function renderEndpoint(node: AnyGraphNode, headerLevel: number, edges: GraphEdg
   return parts.join("\n") + "\n";
 }
 
-function renderRoute(node: AnyGraphNode, headerLevel: number, edges: GraphEdge[], nodesById: Map<string, AnyGraphNode>): string {
+function renderRoute(
+  node: AnyGraphNode,
+  headerLevel: number,
+  edges: GraphEdge[],
+  nodesById: Map<string, AnyGraphNode>,
+  visited: Set<string> = new Set(),
+): string {
   const props = node.props as RouteProps;
   const hashes = "#".repeat(headerLevel);
   const parts: string[] = [`${hashes} Route: ${props.path ?? ""} (\`${node.id}\`)`, ""];
   if (props.description) parts.push(props.description, "");
+  if (visited.has(node.id)) return parts.join("\n");
+  visited.add(node.id);
 
   for (const child of hierarchyChildren(node.id, edges, nodesById)) {
-    if (child.type === "route") parts.push(renderRoute(child, headerLevel + 1, edges, nodesById));
+    if (child.type === "route") parts.push(renderRoute(child, headerLevel + 1, edges, nodesById, visited));
     if (child.type === "endpoint") parts.push(renderEndpoint(child, headerLevel + 1, edges, nodesById));
   }
   return parts.join("\n");
@@ -439,6 +399,7 @@ const CODE_LABELS: Record<ValidationIssue["code"], string> = {
   INVALID_EDGE: "INVALID EDGE",
   INVALID_OPERATION_METHOD: "INVALID OPERATION METHOD",
   DUPLICATE_OPERATION_METHOD: "DUPLICATE OPERATION METHOD",
+  CYCLE_DETECTED: "CYCLE DETECTED",
 };
 
 function renderValidationWarnings(validation: ValidationResult): string {

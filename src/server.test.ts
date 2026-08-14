@@ -116,6 +116,57 @@ describe("REST API", () => {
     expect(invalidEdge.status).toBe(400);
   });
 
+  it("PATCH with position and flat props together keeps both (not just position)", async () => {
+    const domain = await (
+      await fetch(`${baseUrl}/api/nodes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "domain", props: { name: "Auth" } }),
+      })
+    ).json();
+
+    const res = await fetch(`${baseUrl}/api/nodes/${domain.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ position: { x: 1, y: 2 }, name: "Auth2" }),
+    });
+    expect(res.status).toBe(200);
+    const updated = await res.json();
+    expect(updated.position).toEqual({ x: 1, y: 2 });
+    expect(updated.props.name).toBe("Auth2");
+  });
+
+  it("returns 404 (not 400) deleting a node that doesn't exist", async () => {
+    const res = await fetch(`${baseUrl}/api/nodes/does-not-exist`, { method: "DELETE" });
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 404 (not 400) connecting an edge with a missing source/target", async () => {
+    const domain = await (
+      await fetch(`${baseUrl}/api/nodes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "domain", props: { name: "Auth" } }),
+      })
+    ).json();
+
+    const res = await fetch(`${baseUrl}/api/edges`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceId: domain.id, targetId: "does-not-exist" }),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 400, not 500, for malformed JSON bodies", async () => {
+    const res = await fetch(`${baseUrl}/api/nodes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{ not valid json",
+    });
+    expect(res.status).toBe(400);
+  });
+
   it("deletes an edge and clears the target's parentId", async () => {
     const domain = await (
       await fetch(`${baseUrl}/api/nodes`, {
@@ -221,6 +272,36 @@ describe("REST API", () => {
 
     const stack = await (await fetch(`${baseUrl}/api/suggestions/stack?framework=NestJS`)).json();
     expect(stack).toEqual({ orm: "TypeORM", database: "PostgreSQL" });
+  });
+
+  it("imports a graph in merge mode via POST /api/import", async () => {
+    const domain = await (
+      await fetch(`${baseUrl}/api/nodes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "domain", props: { name: "Auth" } }),
+      })
+    ).json();
+
+    const res = await fetch(`${baseUrl}/api/import`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ nodes: [{ ...domain, props: { name: "Auth2" } }], edges: [], mode: "merge" }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ imported: true });
+
+    const project = await (await fetch(`${baseUrl}/api/project`)).json();
+    expect(project.nodes.find((n: { id: string }) => n.id === domain.id).props.name).toBe("Auth2");
+  });
+
+  it("rejects an import with an invalid mode", async () => {
+    const res = await fetch(`${baseUrl}/api/import`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ nodes: [], edges: [], mode: "bogus" }),
+    });
+    expect(res.status).toBe(400);
   });
 
   it("applies wizard answers", async () => {

@@ -30,7 +30,7 @@ npm run build     # tsc --noEmit && vite build -> client/dist/
 npm run preview   # vite preview
 ```
 
-Running the app end-to-end: build the client first (`npm run build` inside `client/`), then from repo root `node dist/cli.js start --project <name> [--port 4173]` — the server serves `client/dist` as static files if present, otherwise API-only. There is no top-level script that chains both builds; run them in each directory.
+Running the app end-to-end: build the client first (`npm run build` inside `client/`), then from repo root `node dist/cli.js start --project <name> [--port 4173] [--host <host>]` — the server serves `client/dist` as static files if present, otherwise API-only. Binds to `127.0.0.1` by default (there's no authentication on the API); pass `--host 0.0.0.0` to expose it on the LAN. There is no top-level script that chains both builds; run them in each directory.
 
 Other CLI commands: `dist/cli.js mcp --project <name>` (starts the MCP stdio server for AI agents) and `dist/cli.js init --project <name> [--template <id>]` (interactive wizard if TTY + no `--template`, otherwise applies one of the templates in `src/init/templates.ts`).
 
@@ -66,7 +66,7 @@ Single source of truth for what's structurally legal, consumed by both the REST 
 
 ### Store (`src/store/project-store.ts`)
 
-`createProjectStore(projectName, opts?)` loads/creates `<baseDir ?? ~/.project-visualizer/projects>/<projectName>/project.json` and returns a `ProjectStore` with the CRUD + validation API. Persistence is synchronous, whole-file, write-to-`.tmp`-then-rename on every mutation — there's no incremental diffing or locking, so treat the store as single-writer. `getProject(scope)` filters nodes/edges to `"backend"` or `"frontend"` node-type sets (see `BACKEND_NODE_TYPES`/`FRONTEND_NODE_TYPES`); `"all"` returns the raw graph.
+`createProjectStore(projectName, opts?)` loads/creates `<baseDir ?? ~/.project-visualizer/projects>/<projectName>/project.json` and returns a `ProjectStore` with the CRUD + validation API. Persistence is synchronous, whole-file, write-to-`.tmp`-then-rename on every mutation — there's no incremental diffing, so treat the store as single-writer per project. A `<project.json>.lock` file (holding the owning process's PID) is acquired in `createProjectStore` to guard against two processes (e.g. `start` and `mcp` pointed at the same `--project`) opening the same file at once: a stale lock left by a dead process is reclaimed silently, a lock held by a still-live process throws. Destructive bulk writes — `importGraph` in `"replace"` mode, or a cascade delete removing more than a handful of nodes (`CASCADE_SNAPSHOT_THRESHOLD`) — first copy the current file into a `.snapshots/` folder next to it; this is a best-effort safety net, not a versioning/undo feature (no retention or pruning). `getProject(scope)` filters nodes/edges to `"backend"` or `"frontend"` node-type sets (see `BACKEND_NODE_TYPES`/`FRONTEND_NODE_TYPES`); `"all"` returns the raw graph (not cloned — callers must not mutate it directly).
 
 ### Two servers, one store (`src/server.ts`, `src/mcp/server.ts`)
 
@@ -76,7 +76,7 @@ The Express server also statically serves `client/dist` (built React SPA) with a
 
 ### Markdown export (`src/export/markdown.ts`)
 
-`exportMarkdown(graph, validation?, domainId?)` renders the graph into an LLM-context-friendly markdown document: manifest, then per-domain trees (route nesting, an endpoint's shared headers/access (`isPublic`/`authMethods`) + its own middleware chain if it has no `operation` children, each `operation` child rendered with its own query/params/body/aggregated-returns table via the shared `renderChain` helper, cache config), floating infra sections (models/tables/tools/external APIs/emails), then frontend (navigation, pages with their component/apiCall/form descendants, stores), then validation warnings. It includes a hand-rolled minimal YAML emitter (`toYamlBlock`) instead of a dependency — intentional, the only inputs are our own plain-data `props` objects.
+`exportMarkdown(graph, validation?, domainId?)` renders the graph into an LLM-context-friendly markdown document: manifest, then per-domain trees (route nesting, an endpoint's shared headers/access (`isPublic`/`authMethods`) + its own middleware chain if it has no `operation` children, each `operation` child rendered with its own query/params/body/aggregated-returns table via the shared `renderChain` helper, cache config), floating infra sections (models/tables/tools/external APIs/emails), then frontend (navigation, pages with their component/apiCall/form descendants, stores), then validation warnings.
 
 ### Agent skills (`skills/*.md`)
 

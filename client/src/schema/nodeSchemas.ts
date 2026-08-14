@@ -264,6 +264,7 @@ export const nodeSchemas: Record<NodeType, NodeTypeSchema> = {
     fields: [
       { key: "name", label: "Nombre", kind: "text" },
       { key: "scope", label: "Alcance", kind: "select", options: ["global", "domain"] },
+      { key: "domainId", label: "Domain", kind: "refSelect", refNodeType: "domain" },
     ],
   },
   envConfig: {

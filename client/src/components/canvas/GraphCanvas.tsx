@@ -25,6 +25,7 @@ import type { SchemaResponse } from "../../api/client";
 import { compatibleSources, compatibleTargets, edgeKind, type ConnectionRules } from "./edgeValidation";
 import {
   chainPortHandle,
+  clearChainEdgeItem,
   parseRefEdgeId,
   refInputPort,
   synthesizeChainEdges,
@@ -231,6 +232,7 @@ export function GraphCanvas({ category }: GraphCanvasProps) {
     schema,
     refetch,
     setSelectedNodeId,
+    notify,
   } = useGraph();
   const { screenToFlowPosition } = useReactFlow();
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
@@ -263,10 +265,10 @@ export function GraphCanvas({ category }: GraphCanvasProps) {
         await refetch();
         setSelectedNodeId(created.id);
       } catch (err) {
-        console.error(err);
+        notify(err instanceof Error ? err.message : String(err));
       }
     },
-    [nodesById, graphNodes, connectionRules, refetch, setSelectedNodeId],
+    [nodesById, graphNodes, connectionRules, refetch, setSelectedNodeId, notify],
   );
 
   const handleQuickAddIncoming = useCallback(
@@ -282,10 +284,10 @@ export function GraphCanvas({ category }: GraphCanvasProps) {
         await refetch();
         setSelectedNodeId(created.id);
       } catch (err) {
-        console.error(err);
+        notify(err instanceof Error ? err.message : String(err));
       }
     },
-    [nodesById, graphNodes, connectionRules, refetch, setSelectedNodeId],
+    [nodesById, graphNodes, connectionRules, refetch, setSelectedNodeId, notify],
   );
 
   const handleRefInputQuickAdd = useCallback(
@@ -299,10 +301,10 @@ export function GraphCanvas({ category }: GraphCanvasProps) {
         await refetch();
         setSelectedNodeId(created.id);
       } catch (err) {
-        console.error(err);
+        notify(err instanceof Error ? err.message : String(err));
       }
     },
-    [nodesById, graphNodes, refetch, setSelectedNodeId],
+    [nodesById, graphNodes, refetch, setSelectedNodeId, notify],
   );
 
   const handleRefOutputQuickAdd = useCallback(
@@ -316,10 +318,10 @@ export function GraphCanvas({ category }: GraphCanvasProps) {
         await refetch();
         setSelectedNodeId(created.id);
       } catch (err) {
-        console.error(err);
+        notify(err instanceof Error ? err.message : String(err));
       }
     },
-    [nodesById, graphNodes, refetch, setSelectedNodeId],
+    [nodesById, graphNodes, refetch, setSelectedNodeId, notify],
   );
 
   const edgeMenuRef = useRef<HTMLDivElement>(null);
@@ -366,9 +368,9 @@ export function GraphCanvas({ category }: GraphCanvasProps) {
       await refetch();
       setSelectedNodeId(created.id);
     } catch (err) {
-      console.error(err);
+      notify(err instanceof Error ? err.message : String(err));
     }
-  }, [nodeMenu, nodesById, graphEdges, connectionRules, refetch, setSelectedNodeId]);
+  }, [nodeMenu, nodesById, graphEdges, connectionRules, refetch, setSelectedNodeId, notify]);
 
   const handleCopyNodeId = useCallback(() => {
     if (!nodeMenu) return;
@@ -386,10 +388,10 @@ export function GraphCanvas({ category }: GraphCanvasProps) {
         await api.setNodeContainer(nodeId, containerId);
         await refetch();
       } catch (err) {
-        console.error(err);
+        notify(err instanceof Error ? err.message : String(err));
       }
     },
-    [nodeMenu, refetch],
+    [nodeMenu, refetch, notify],
   );
 
   const handleDeleteFromNodeMenu = useCallback(() => {
@@ -497,10 +499,10 @@ export function GraphCanvas({ category }: GraphCanvasProps) {
         }
         await refetch();
       } catch (err) {
-        console.error(err);
+        notify(err instanceof Error ? err.message : String(err));
       }
     },
-    [connectionRules, refPortRules, chainSpecForHandle, nodesById, refetch],
+    [connectionRules, refPortRules, chainSpecForHandle, nodesById, refetch, notify],
   );
 
   const handleConnectStart: OnConnectStart = useCallback(
@@ -528,17 +530,17 @@ export function GraphCanvas({ category }: GraphCanvasProps) {
 
   const handleNodeDragStop: OnNodeDrag<RFNode<GenericNodeData | ContainerNodeData | NoteNodeData>> = useCallback(
     (_event, node) => {
-      void api.updateNodePosition(node.id, node.position).catch((err) => console.error(err));
+      void api.updateNodePosition(node.id, node.position).catch((err) => notify(err instanceof Error ? err.message : String(err)));
       const graphNode = nodesById.get(node.id);
       const newContainerId = node.parentId;
       if (graphNode && graphNode.containerId !== newContainerId) {
         void api
           .setNodeContainer(node.id, newContainerId)
           .then(() => refetch())
-          .catch((err) => console.error(err));
+          .catch((err) => notify(err instanceof Error ? err.message : String(err)));
       }
     },
-    [nodesById, refetch],
+    [nodesById, refetch, notify],
   );
 
   const handleDrop = useCallback(
@@ -546,13 +548,17 @@ export function GraphCanvas({ category }: GraphCanvasProps) {
       event.preventDefault();
       const type = event.dataTransfer.getData("application/pv-node-type") as NodeType | "";
       if (!type) return;
-      const position = screenToFlowPosition({ x: event.clientX, y: event.clientY });
-      const created = await api.createNode(type, {});
-      await api.updateNodePosition(created.id, position);
-      await refetch();
-      setSelectedNodeId(created.id);
+      try {
+        const position = screenToFlowPosition({ x: event.clientX, y: event.clientY });
+        const created = await api.createNode(type, {});
+        await api.updateNodePosition(created.id, position);
+        await refetch();
+        setSelectedNodeId(created.id);
+      } catch (err) {
+        notify(err instanceof Error ? err.message : String(err));
+      }
     },
-    [screenToFlowPosition, refetch, setSelectedNodeId],
+    [screenToFlowPosition, refetch, setSelectedNodeId, notify],
   );
 
   const handleDragOver = useCallback((event: React.DragEvent) => {
@@ -567,12 +573,12 @@ export function GraphCanvas({ category }: GraphCanvasProps) {
         setSelectedNodeId(null);
         await refetch();
       } catch (err) {
-        console.error(err);
+        notify(err instanceof Error ? err.message : String(err));
       } finally {
         setPendingDeleteId(null);
       }
     },
-    [pendingDeleteId, refetch, setSelectedNodeId],
+    [pendingDeleteId, refetch, setSelectedNodeId, notify],
   );
 
   const handleEdgeContextMenu: EdgeMouseHandler = useCallback((event, edge) => {
@@ -584,18 +590,22 @@ export function GraphCanvas({ category }: GraphCanvasProps) {
     if (!edgeMenu) return;
     try {
       const ref = parseRefEdgeId(edgeMenu.edgeId);
-      if (ref) {
+      if (ref?.kind === "simple") {
         await api.updateNode(ref.nodeId, { [ref.field]: null });
+      } else if (ref?.kind === "chain") {
+        const node = nodesById.get(ref.nodeId);
+        const patch = node && clearChainEdgeItem(node, ref.arrayField, ref.index);
+        if (patch) await api.updateNode(ref.nodeId, patch);
       } else {
         await api.deleteEdge(edgeMenu.edgeId);
       }
       await refetch();
     } catch (err) {
-      console.error(err);
+      notify(err instanceof Error ? err.message : String(err));
     } finally {
       setEdgeMenu(null);
     }
-  }, [edgeMenu, refetch]);
+  }, [edgeMenu, nodesById, refetch, notify]);
 
   const handleSelectFromMenu = useCallback(
     (nodeId: string) => {

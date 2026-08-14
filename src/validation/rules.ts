@@ -76,6 +76,7 @@ export const REF_FIELDS: Partial<Record<NodeType, RefFieldSpec[]>> = {
     { field: "relations[].targetTableId", targetType: "table", array: true },
     { field: "dbId", targetType: "db" },
   ],
+  errorHandler: [{ field: "domainId", targetType: "domain" }],
 };
 
 export const REQUIRED_FIELDS: Record<NodeType, string[]> = {
@@ -132,7 +133,8 @@ export interface ValidationIssue {
     | "INVALID_REF_TYPE"
     | "INVALID_EDGE"
     | "INVALID_OPERATION_METHOD"
-    | "DUPLICATE_OPERATION_METHOD";
+    | "DUPLICATE_OPERATION_METHOD"
+    | "CYCLE_DETECTED";
   nodeId?: string;
   edgeId?: string;
   field?: string;
@@ -169,6 +171,17 @@ export function validateRequiredFields(node: AnyGraphNode): ValidationIssue[] {
         message: `Node ${node.id} (${node.type}) is missing required field "${field}"`,
       });
     }
+  }
+  // errorHandler.domainId is only required when scope === "domain" — not a plain REQUIRED_FIELDS
+  // entry because it doesn't apply to scope === "global".
+  if (node.type === "errorHandler" && props.scope === "domain" && !props.domainId) {
+    issues.push({
+      level: "error",
+      code: "MISSING_FIELD",
+      nodeId: node.id,
+      field: "domainId",
+      message: `Node ${node.id} (errorHandler) has scope "domain" but is missing required field "domainId"`,
+    });
   }
   return issues;
 }

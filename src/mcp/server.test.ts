@@ -85,4 +85,13 @@ describe("createMcpServer", () => {
     const node = JSON.parse(created.content[0].text);
     expect(store.getNode(node.id)).toBeTruthy();
   });
+
+  it("get_node returns a proper error (not a stringified undefined) for a missing id", async () => {
+    const server = createMcpServer(store);
+    const tools = (server as unknown as { _registeredTools: Record<string, { handler: (args: unknown, extra: unknown) => Promise<{ content: { text: string }[]; isError?: boolean }> }> })._registeredTools;
+    const result = await tools.get_node.handler({ id: "does-not-exist" }, {});
+    expect(result.isError).toBe(true);
+    expect(typeof result.content[0].text).toBe("string");
+    expect(result.content[0].text).not.toBe("undefined");
+  });
 });

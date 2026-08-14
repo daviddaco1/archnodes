@@ -9,11 +9,12 @@ import { PropertyPanel } from "./components/properties/PropertyPanel";
 import { OverviewTab } from "./components/overview/OverviewTab";
 import { ValidationPanel } from "./components/validation/ValidationPanel";
 import { SetupWizardModal } from "./components/setup/SetupWizardModal";
+import { ErrorToast } from "./components/common/ErrorToast";
 import { nodeSchemas } from "./schema/nodeSchemas";
 import type { ValidationIssue, ValidationResult } from "./api/client";
 
 function AppShell() {
-  const { loading, error, nodes, edges, manifest, refetch, setSelectedNodeId, setFocusField } = useGraph();
+  const { loading, error, notice, dismissNotice, nodes, edges, manifest, refetch, setSelectedNodeId, setFocusField } = useGraph();
   const [tab, setTab] = useState<TabKey>("backend");
   const [validation, setValidation] = useState<ValidationResult | null>(null);
   const [setupOpen, setSetupOpen] = useState(false);
@@ -70,6 +71,7 @@ function AppShell() {
         )}
         <ValidationPanel result={validation} onClose={() => setValidation(null)} onNavigate={handleNavigateToIssue} />
       </div>
+      {notice && <ErrorToast message={notice} onDismiss={dismissNotice} />}
       {setupOpen && (
         <SetupWizardModal
           onClose={() => setSetupOpen(false)}

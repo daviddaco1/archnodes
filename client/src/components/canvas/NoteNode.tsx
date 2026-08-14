@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { NodeProps } from "@xyflow/react";
 import * as api from "../../api/client";
+import { useGraph } from "../../context/GraphContext";
 
 export interface NoteNodeData {
   props: { text?: string; color?: "yellow" | "blue" | "pink" | "green" };
@@ -17,6 +18,7 @@ const NOTE_COLORS: Record<string, string> = {
 export function NoteNode({ data, id }: NodeProps & { data: NoteNodeData }) {
   const [text, setText] = useState(data.props.text ?? "");
   const background = NOTE_COLORS[data.props.color ?? "yellow"];
+  const { notify } = useGraph();
 
   return (
     <div
@@ -34,7 +36,7 @@ export function NoteNode({ data, id }: NodeProps & { data: NoteNodeData }) {
         className="nodrag"
         value={text}
         onChange={(e) => setText(e.target.value)}
-        onBlur={() => void api.updateNode(id, { text }).catch((err) => console.error(err))}
+        onBlur={() => void api.updateNode(id, { text }).catch((err) => notify(err instanceof Error ? err.message : String(err)))}
         placeholder="Nota..."
         style={{
           width: "100%",

@@ -4,7 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createProjectStore, type ProjectStore } from "../store/project-store.js";
-import { exportMarkdown, toYamlBlock } from "./markdown.js";
+import { exportMarkdown } from "./markdown.js";
+import type { AnyGraphNode, GraphEdge, ProjectGraph } from "../types/graph.js";
+
+function rawNode(id: string, type: AnyGraphNode["type"], props: Record<string, unknown>, parentId?: string): AnyGraphNode {
+  return { id, type, label: id, position: { x: 0, y: 0 }, props, parentId, createdAt: "now", updatedAt: "now" } as AnyGraphNode;
+}
 
 let baseDir: string;
 let store: ProjectStore;
@@ -230,21 +235,44 @@ describe("exportMarkdown", () => {
   });
 });
 
-describe("toYamlBlock", () => {
-  it("renders a flat object", () => {
-    expect(toYamlBlock({ a: 1, b: "x" })).toBe("a: 1\nb: x\n");
+// The store rejects hierarchy cycles at write time (see project-store.test.ts), but export must
+// not hang or stack-overflow on data written before that check existed, or edited by hand.
+describe("cycle safety (hand-built cyclic graph, bypassing the store)", () => {
+  it("terminates on a component hierarchy cycle under a page", () => {
+    const page = rawNode("p1", "page", { name: "Home", path: "/" });
+    const c1 = rawNode("c1", "component", { name: "C1", kind: "presentational" }, "p1");
+    const c2 = rawNode("c2", "component", { name: "C2", kind: "presentational" }, "c1");
+    const graph: ProjectGraph = {
+      manifest: { projectName: "p", createdAt: "now", updatedAt: "now" },
+      nodes: [page, c1, c2],
+      edges: [
+        { id: "e1", source: "p1", target: "c1", edgeType: "hierarchy" },
+        { id: "e2", source: "c1", target: "c2", edgeType: "hierarchy" },
+        { id: "e3", source: "c2", target: "c1", edgeType: "hierarchy" },
+      ] as GraphEdge[],
+    };
+    const md = exportMarkdown(graph);
+    expect(md).toContain("Page: Home");
+    expect(md).toContain("C1");
   });
-  it("renders a nested object", () => {
-    expect(toYamlBlock({ a: { b: 1 } })).toBe("a:\n  b: 1\n");
-  });
-  it("renders an array of primitives", () => {
-    expect(toYamlBlock(["a", "b"])).toBe("- a\n- b\n");
-  });
-  it("renders an array of objects", () => {
-    expect(toYamlBlock([{ a: 1 }, { a: 2 }])).toBe("- a: 1\n- a: 2\n");
-  });
-  it("renders an undefined nested scalar as null, consistent with a null value", () => {
-    expect(toYamlBlock({ a: undefined })).toBe("a: null\n");
-    expect(toYamlBlock({ a: null })).toBe("a: null\n");
+
+  it("terminates on a route hierarchy cycle under a domain", () => {
+    const domain = rawNode("d1", "domain", { name: "Auth" });
+    const r1 = rawNode("r1", "route", { path: "/a" }, "d1");
+    const r2 = rawNode("r2", "route", { path: "/b" }, "r1");
+    const endpoint = rawNode("e1", "endpoint", { name: "x", methods: ["GET"] }, "r1");
+    const graph: ProjectGraph = {
+      manifest: { projectName: "p", createdAt: "now", updatedAt: "now" },
+      nodes: [domain, r1, r2, endpoint],
+      edges: [
+        { id: "e1", source: "d1", target: "r1", edgeType: "hierarchy" },
+        { id: "e2", source: "r1", target: "r2", edgeType: "hierarchy" },
+        { id: "e3", source: "r2", target: "r1", edgeType: "hierarchy" },
+        { id: "e4", source: "r1", target: "e1", edgeType: "hierarchy" },
+      ] as GraphEdge[],
+    };
+    const md = exportMarkdown(graph);
+    expect(typeof md).toBe("string");
+    expect(md).toContain("Domain: Auth");
   });
 });

@@ -4,6 +4,7 @@ import type { AnyGraphNode, ModelField, TableColumn } from "../../types/graph";
 import { FieldRenderer } from "./FieldRenderer";
 import { useGraph } from "../../context/GraphContext";
 import * as api from "../../api/client";
+import { ApiError } from "../../api/client";
 
 interface PropertyFormProps {
   node: AnyGraphNode;
@@ -80,7 +81,13 @@ export function PropertyForm({ node, onSaved }: PropertyFormProps) {
       })
       .catch((err) => {
         setDraft(node.props as Record<string, unknown>);
-        setSaveError(err instanceof Error ? err.message : String(err));
+        const message =
+          err instanceof ApiError && err.issues?.length
+            ? err.issues.map((i) => i.message).join("; ")
+            : err instanceof Error
+              ? err.message
+              : String(err);
+        setSaveError(message);
       });
   };
 

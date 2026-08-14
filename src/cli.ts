@@ -10,7 +10,8 @@ function printUsage(): void {
   console.error(`project-visualizer <command> [options]
 
 Commands:
-  start --project <name> [--port <port>]   Start the visual editor server
+  start --project <name> [--port <port>] [--host <host>]   Start the visual editor server
+                                            (default host 127.0.0.1; pass --host 0.0.0.0 to expose on the LAN — no auth)
   mcp --project <name>                      Start the MCP stdio server for AI agents
   init --project <name> [--template <id>]   Initialize a new project (interactive or via template)
 
@@ -29,11 +30,11 @@ function requireProject(project: string | undefined): string {
 async function runStart(argv: string[]): Promise<void> {
   const { values } = parseArgs({
     args: argv,
-    options: { project: { type: "string" }, port: { type: "string" } },
+    options: { project: { type: "string" }, port: { type: "string" }, host: { type: "string" } },
   });
   const project = requireProject(values.project);
   const store = createProjectStore(project);
-  startServer(store, { port: values.port ? Number(values.port) : 4173 });
+  startServer(store, { port: values.port ? Number(values.port) : 4173, host: values.host });
 }
 
 async function runMcp(argv: string[]): Promise<void> {

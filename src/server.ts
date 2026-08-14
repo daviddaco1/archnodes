@@ -62,13 +62,18 @@ export function createServer(store: ProjectStore): express.Express {
     if (!node) return res.status(404).json({ error: "not found" });
     if (body.position !== undefined) node = store.setPosition(req.params.id, body.position);
     if (body.containerId !== undefined) node = store.setContainer(req.params.id, body.containerId || undefined);
-    if (body.props !== undefined || (body.position === undefined && body.containerId === undefined)) {
-      node = store.updateNode(req.params.id, body.props ?? body);
+    // Props can arrive wrapped ({props: {...}}) or as flat extra keys alongside position/containerId —
+    // either way, any leftover data key must still reach updateNode, not just when position/containerId are absent.
+    const { position: _position, containerId: _containerId, props, ...rest } = body;
+    const propsPatch = props !== undefined ? props : rest;
+    if (Object.keys(propsPatch).length > 0) {
+      node = store.updateNode(req.params.id, propsPatch);
     }
     res.json(node);
   });
 
   app.delete("/api/nodes/:id", (req: Request, res: Response) => {
+    if (!store.getNode(req.params.id)) return res.status(404).json({ error: "not found" });
     const cascade = req.query.cascade === "true";
     const result = store.deleteNode(req.params.id, cascade);
     res.json(result);
@@ -76,6 +81,12 @@ export function createServer(store: ProjectStore): express.Express {
 
   app.post("/api/edges", (req: Request, res: Response) => {
     const { sourceId, targetId, edgeType } = req.body ?? {};
+    if (typeof sourceId !== "string" || !store.getNode(sourceId)) {
+      return res.status(404).json({ error: "source node not found" });
+    }
+    if (typeof targetId !== "string" || !store.getNode(targetId)) {
+      return res.status(404).json({ error: "target node not found" });
+    }
     const edge = store.connectNodes(sourceId, targetId, edgeType as EdgeType | undefined);
     res.status(201).json(edge);
   });
@@ -83,6 +94,18 @@ export function createServer(store: ProjectStore): express.Express {
   app.delete("/api/edges/:id", (req: Request, res: Response) => {
     store.deleteEdge(req.params.id);
     res.status(204).end();
+  });
+
+  app.post("/api/import", (req: Request, res: Response) => {
+    const { nodes, edges, mode } = req.body ?? {};
+    if (mode !== "merge" && mode !== "replace") {
+      return res.status(400).json({ error: 'mode must be "merge" or "replace"' });
+    }
+    if (!Array.isArray(nodes) || !Array.isArray(edges)) {
+      return res.status(400).json({ error: "nodes and edges must be arrays" });
+    }
+    store.importGraph(nodes, edges, mode);
+    res.json({ imported: true });
   });
 
   app.get("/api/validate", (_req: Request, res: Response) => {
@@ -149,6 +172,12 @@ export function createServer(store: ProjectStore): express.Express {
     if (err instanceof ValidationError) {
       return res.status(400).json({ error: err.message, issues: err.issues });
     }
+    // body-parser (express.json()) reports malformed JSON / oversized payloads as errors carrying
+    // their own 4xx status (e.g. PayloadTooLargeError.status === 413) — surface that instead of 500.
+    const status = (err as { status?: unknown; statusCode?: unknown } | null)?.status ?? (err as { statusCode?: unknown } | null)?.statusCode;
+    if (typeof status === "number" && status >= 400 && status < 500) {
+      return res.status(status).json({ error: err instanceof Error ? err.message : "bad request" });
+    }
     console.error(err);
     res.status(500).json({ error: "internal error" });
   });
@@ -156,16 +185,21 @@ export function createServer(store: ProjectStore): express.Express {
   return app;
 }
 
-export function startServer(store: ProjectStore, opts: { port: number }): Server {
+export function startServer(store: ProjectStore, opts: { port: number; host?: string }): Server {
   const app = createServer(store);
   const server = createHttpServer(app);
-  server.listen(opts.port, "0.0.0.0", () => {
-    const nets = networkInterfaces();
-    const lan = Object.values(nets)
-      .flat()
-      .find((net) => net && net.family === "IPv4" && !net.internal)?.address;
+  const host = opts.host ?? "127.0.0.1";
+  server.listen(opts.port, host, () => {
     console.error(`project-visualizer listening on http://localhost:${opts.port}`);
-    if (lan) console.error(`  also available on http://${lan}:${opts.port}`);
+    if (host === "0.0.0.0") {
+      // Only look up (and advertise) the LAN address when the caller explicitly opted into
+      // exposing the server beyond localhost — there is no authentication on this API.
+      const nets = networkInterfaces();
+      const lan = Object.values(nets)
+        .flat()
+        .find((net) => net && net.family === "IPv4" && !net.internal)?.address;
+      if (lan) console.error(`  also available on http://${lan}:${opts.port} (no auth — only expose on trusted networks)`);
+    }
   });
   return server;
 }

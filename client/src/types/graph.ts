@@ -202,6 +202,7 @@ export interface SchedulerProps {
 export interface ErrorHandlerProps {
   name: string;
   scope: "global" | "domain";
+  domainId?: string;
   handledErrors?: string[];
 }
 

@@ -60,7 +60,12 @@ export function createMcpServer(store: ProjectStore): McpServer {
       description: "Get a single node by id",
       inputSchema: { id: z.string() },
     },
-    async ({ id }) => tryResult(() => store.getNode(id)),
+    async ({ id }) =>
+      tryResult(() => {
+        const node = store.getNode(id);
+        if (!node) throw new ValidationError([{ level: "error", code: "BROKEN_REF", nodeId: id, message: `Node ${id} not found` }]);
+        return node;
+      }),
   );
 
   server.registerTool(

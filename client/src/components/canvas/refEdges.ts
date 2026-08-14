@@ -148,11 +148,37 @@ export function refEdgeId(nodeId: string, field: string): string {
   return `${REF_EDGE_PREFIX}${nodeId}__${field}`;
 }
 
-export function parseRefEdgeId(id: string): { nodeId: string; field: string } | undefined {
+export type ParsedRefEdgeId =
+  | { kind: "simple"; nodeId: string; field: string }
+  | { kind: "chain"; nodeId: string; arrayField: string; index: number };
+
+// A simple ref edge id is `ref__{nodeId}__{field}` (2 segments); a chain edge id (built in
+// synthesizeChainEdges above) is `ref__{nodeId}__{arrayField}__{index}` (3 segments) — the index
+// must round-trip or a "delete connection" click on a chain edge would wipe the whole array
+// instead of clearing just that item's chainToId.
+export function parseRefEdgeId(id: string): ParsedRefEdgeId | undefined {
   if (!id.startsWith(REF_EDGE_PREFIX)) return undefined;
-  const [nodeId, field] = id.slice(REF_EDGE_PREFIX.length).split("__");
+  const parts = id.slice(REF_EDGE_PREFIX.length).split("__");
+  if (parts.length === 3) {
+    const [nodeId, arrayField, indexStr] = parts;
+    const index = Number(indexStr);
+    if (!nodeId || !arrayField || Number.isNaN(index)) return undefined;
+    return { kind: "chain", nodeId, arrayField, index };
+  }
+  const [nodeId, field] = parts;
   if (!nodeId || !field) return undefined;
-  return { nodeId, field };
+  return { kind: "simple", nodeId, field };
+}
+
+// Clears only item[index]'s chainToId, leaving the rest of the array (and the item itself) intact.
+// Returns undefined if the array/index no longer matches what the canvas rendered (e.g. the item
+// was removed between render and click) — the caller should then skip the update entirely.
+export function clearChainEdgeItem(node: AnyGraphNode, arrayField: string, index: number): Record<string, unknown> | undefined {
+  const items = (node.props as Record<string, unknown>)[arrayField];
+  if (!Array.isArray(items) || !items[index]) return undefined;
+  const next = [...items];
+  next[index] = { ...next[index], chainToId: undefined };
+  return { [arrayField]: next };
 }
 
 export interface SyntheticRefEdge {

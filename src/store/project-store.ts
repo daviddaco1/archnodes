@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, existsSync, readFileSync, writeFileSync, renameSync } from "node:fs";
+import { mkdirSync, existsSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type {
   AnyGraphNode,
   BackendNodeType,
@@ -22,6 +22,9 @@ import {
   type ValidationIssue,
   type ValidationResult,
 } from "../validation/rules.js";
+
+// Below this many nodes, a cascade delete is cheap to redo by hand; above it, snapshot first.
+const CASCADE_SNAPSHOT_THRESHOLD = 5;
 
 const BACKEND_SET = new Set<NodeType>(BACKEND_NODE_TYPES);
 const FRONTEND_SET = new Set<NodeType>(FRONTEND_NODE_TYPES);
@@ -73,9 +76,77 @@ function loadOrInit(projectName: string, path: string): ProjectGraph {
   };
 }
 
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM means the process exists but is owned by someone else — still counts as alive.
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+// One process-level exit hook releases every lock this process holds, instead of one
+// `process.once` listener per store — createProjectStore can be called many times per process
+// (e.g. across a test suite) without tripping Node's max-listeners warning.
+const activeLocks = new Set<string>();
+let exitHandlersRegistered = false;
+
+function releaseAllLocks(): void {
+  for (const lockPath of activeLocks) {
+    try {
+      if (readFileSync(lockPath, "utf-8").trim() === String(process.pid)) unlinkSync(lockPath);
+    } catch {
+      // already gone — nothing to release
+    }
+  }
+  activeLocks.clear();
+}
+
+function registerExitHandlersOnce(): void {
+  if (exitHandlersRegistered) return;
+  exitHandlersRegistered = true;
+  process.once("exit", releaseAllLocks);
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    process.once(signal, () => {
+      releaseAllLocks();
+      process.exit(0);
+    });
+  }
+}
+
+// Guards against the exact failure mode two servers sharing one project.json are prone to:
+// each process holds its own in-memory copy, and whichever persists last silently wins. A stale
+// lock (owner process no longer alive) is reclaimed rather than treated as a conflict.
+function acquireLock(lockPath: string): void {
+  if (existsSync(lockPath)) {
+    const ownerPid = Number(readFileSync(lockPath, "utf-8").trim());
+    if (Number.isFinite(ownerPid) && ownerPid !== process.pid && isProcessAlive(ownerPid)) {
+      throw new Error(
+        `Project is already open in another process (pid ${ownerPid}). Close it before starting a new one — ` +
+          `running two at once against the same project.json silently overwrites whichever one saves last.`,
+      );
+    }
+  }
+  writeFileSync(lockPath, String(process.pid));
+  activeLocks.add(lockPath);
+  registerExitHandlersOnce();
+}
+
+// Lightweight safety net for destructive bulk writes (import replace, large cascade deletes) —
+// a single best-effort copy of the current file, not a history/versioning feature. No retention
+// or pruning: add that (Fase 8, per the audit roadmap) if snapshots need to become a real feature.
+function snapshotIfExists(filePath: string): void {
+  if (!existsSync(filePath)) return;
+  const snapshotDir = join(dirname(filePath), ".snapshots");
+  mkdirSync(snapshotDir, { recursive: true });
+  writeFileSync(join(snapshotDir, `project.${Date.now()}.json`), readFileSync(filePath));
+}
+
 export function createProjectStore(projectName: string, opts: ProjectStoreOptions = {}): ProjectStore {
   const filePath = projectPath(projectName, opts.baseDir);
   mkdirSync(join(filePath, ".."), { recursive: true });
+  acquireLock(`${filePath}.lock`);
   let graph = loadOrInit(projectName, filePath);
 
   function persist(): void {
@@ -147,6 +218,37 @@ export function createProjectStore(projectName: string, opts: ProjectStoreOption
     if (issues.length > 0) throw new ValidationError(issues);
   }
 
+  // Walks from `startId` via `next()` looking for `targetId`, stopping (false) if it runs off the
+  // graph or loops back on itself first — the visited-set makes this safe even if the data already
+  // contains a cycle from before this check existed.
+  function walksTo(startId: string, targetId: string, next: (n: AnyGraphNode) => string | undefined): boolean {
+    const visited = new Set<string>();
+    let currentId: string | undefined = startId;
+    while (currentId) {
+      if (currentId === targetId) return true;
+      if (visited.has(currentId)) return false;
+      visited.add(currentId);
+      const node = findNode(currentId);
+      if (!node) return false;
+      currentId = next(node);
+    }
+    return false;
+  }
+
+  function assertNoHierarchyCycle(parentId: string, childId: string): void {
+    // childId becoming an ancestor of its own would-be parent (or parentId===childId) forms a loop.
+    if (walksTo(parentId, childId, (n) => n.parentId)) {
+      throw new ValidationError([
+        {
+          level: "error",
+          code: "CYCLE_DETECTED",
+          nodeId: childId,
+          message: `Cannot set ${childId} as a child of ${parentId}: would create a hierarchy cycle`,
+        },
+      ]);
+    }
+  }
+
   function linkHierarchy(parentId: string, childId: string): GraphEdge {
     const parent = requireNode(parentId);
     const child = requireNode(childId);
@@ -160,6 +262,7 @@ export function createProjectStore(projectName: string, opts: ProjectStoreOption
         },
       ]);
     }
+    assertNoHierarchyCycle(parentId, childId);
     const edge: GraphEdge = { id: randomUUID(), source: parentId, target: childId, edgeType: "hierarchy" };
     graph.edges.push(edge);
     child.parentId = parentId;
@@ -231,6 +334,14 @@ export function createProjectStore(projectName: string, opts: ProjectStoreOption
       const allNodes = graph.nodes.map((n) => (n.id === id ? candidate : n));
       assertValidNode(candidate, allNodes);
       assertValidOperationMethod(candidate, allNodes);
+      if (candidate.type === "endpoint") {
+        // Editing methods must not silently orphan an existing operation child's method.
+        const children = graph.edges
+          .filter((e) => e.edgeType === "hierarchy" && e.source === id)
+          .map((e) => allNodes.find((n) => n.id === e.target))
+          .filter((n): n is AnyGraphNode => Boolean(n && n.type === "operation"));
+        for (const child of children) assertValidOperationMethod(child, allNodes);
+      }
       node.props = merged as never;
       node.updatedAt = now();
       if (typeof merged.name === "string") node.label = merged.name;
@@ -247,8 +358,22 @@ export function createProjectStore(projectName: string, opts: ProjectStoreOption
     },
 
     setContainer(id: string, containerId: string | undefined) {
-      // Visual-only grouping (React Flow subflow), not a hierarchy edge — no connection-rule check.
+      // Visual-only grouping (React Flow subflow), not a hierarchy edge — no connection-rule check,
+      // but it still must resolve to a real node and can't nest a container inside itself.
       const node = requireNode(id);
+      if (containerId !== undefined) {
+        requireNode(containerId);
+        if (walksTo(containerId, id, (n) => n.containerId)) {
+          throw new ValidationError([
+            {
+              level: "error",
+              code: "CYCLE_DETECTED",
+              nodeId: id,
+              message: `Cannot set ${id}'s container to ${containerId}: would create a container cycle`,
+            },
+          ]);
+        }
+      }
       node.containerId = containerId;
       node.updatedAt = now();
       persist();
@@ -278,9 +403,15 @@ export function createProjectStore(projectName: string, opts: ProjectStoreOption
         }
       }
 
+      if (toDelete.size > CASCADE_SNAPSHOT_THRESHOLD) snapshotIfExists(filePath);
+
       graph.nodes = graph.nodes.filter((n) => !toDelete.has(n.id));
       graph.edges = graph.edges.filter((e) => !toDelete.has(e.source) && !toDelete.has(e.target));
       clearDanglingRefs(graph.nodes, toDelete);
+      // containerId is visual-only grouping, not a REF_FIELDS ref — clearDanglingRefs doesn't touch it.
+      for (const n of graph.nodes) {
+        if (n.containerId && toDelete.has(n.containerId)) n.containerId = undefined;
+      }
       persist();
       return { deletedIds: [...toDelete] };
     },
@@ -303,6 +434,8 @@ export function createProjectStore(projectName: string, opts: ProjectStoreOption
       );
       if (existing) return existing;
       if (edgeType === "hierarchy") {
+        assertNoHierarchyCycle(sourceId, targetId);
+        if (target.type === "operation") assertValidOperationMethod(target, graph.nodes, sourceId);
         // A child has at most one live hierarchy parent — reparenting replaces the old edge.
         graph.edges = graph.edges.filter((e) => !(e.edgeType === "hierarchy" && e.target === targetId));
       }
@@ -332,6 +465,7 @@ export function createProjectStore(projectName: string, opts: ProjectStoreOption
 
     importGraph(nodes: AnyGraphNode[], edges: GraphEdge[], mode: "merge" | "replace") {
       if (mode === "replace") {
+        snapshotIfExists(filePath);
         graph.nodes = nodes;
         graph.edges = edges;
       } else {

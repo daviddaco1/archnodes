@@ -83,6 +83,25 @@ describe("validateRequiredFields", () => {
     const issues = validateRequiredFields(node("e1", "endpoint", { name: "Login", methods: ["POST"] }));
     expect(issues).toHaveLength(0);
   });
+
+  it("flags a domain-scoped errorHandler missing domainId", () => {
+    const issues = validateRequiredFields(node("eh1", "errorHandler", { name: "DomainHandler", scope: "domain" }));
+    expect(issues).toHaveLength(1);
+    expect(issues[0].code).toBe("MISSING_FIELD");
+    expect(issues[0].field).toBe("domainId");
+  });
+
+  it("does not require domainId for a global-scoped errorHandler", () => {
+    const issues = validateRequiredFields(node("eh1", "errorHandler", { name: "GlobalHandler", scope: "global" }));
+    expect(issues).toHaveLength(0);
+  });
+
+  it("passes a domain-scoped errorHandler with domainId set", () => {
+    const issues = validateRequiredFields(
+      node("eh1", "errorHandler", { name: "DomainHandler", scope: "domain", domainId: "d1" }),
+    );
+    expect(issues).toHaveLength(0);
+  });
 });
 
 describe("validateHierarchy", () => {
@@ -198,6 +217,17 @@ describe("validateRefs", () => {
 
     const badEmail = [node("em1", "email", { trigger: "signup", errors: [{ status: "fail", chainToId: "missing" }] })];
     expect(validateRefs(badEmail)[0].code).toBe("BROKEN_REF");
+  });
+
+  it("validates errorHandler.domainId", () => {
+    const badNodes = [node("eh1", "errorHandler", { name: "DomainHandler", scope: "domain", domainId: "missing" })];
+    expect(validateRefs(badNodes)[0].code).toBe("BROKEN_REF");
+
+    const goodNodes = [
+      node("d1", "domain", { name: "Auth" }),
+      node("eh1", "errorHandler", { name: "DomainHandler", scope: "domain", domainId: "d1" }),
+    ];
+    expect(validateRefs(goodNodes)).toHaveLength(0);
   });
 });
 
